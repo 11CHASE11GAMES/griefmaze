@@ -47,8 +47,6 @@ const reportSchema = new mongoose.Schema({
 const Report = mongoose.model('Report', reportSchema);
 
 app.use(express.static('public'));
-app.use('/build', express.static(__dirname + '/node_modules/three/build'));
-app.use('/jsm', express.static(__dirname + '/node_modules/three/examples/jsm'));
 
 // ==========================================
 // GAME LOBBY CLASS
