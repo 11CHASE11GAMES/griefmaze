@@ -1,0 +1,18 @@
+{
+  "name": "griefmaze-io",
+  "version": "1.0.0",
+  "description": "Multiplayer maze game",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.18.2",
+    "mongoose": "^7.0.0",
+    "socket.io": "^4.6.1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
