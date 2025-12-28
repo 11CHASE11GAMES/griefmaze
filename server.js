@@ -572,6 +572,29 @@ io.on('connection', (socket) => {
         }
     });
 
+    // --- PROFILE MANAGEMENT ---
+    socket.on('changePassword', async ({ oldPassword, newPassword }) => {
+        if (!socket.data.isAuthenticated || !socket.data.dbId) return;
+        
+        try {
+            const user = await User.findById(socket.data.dbId);
+            if (!user) return socket.emit('authError', 'User not found.');
+
+            // Verify Old Password
+            const isMatch = await bcrypt.compare(oldPassword, user.password);
+            if (!isMatch) return socket.emit('authError', 'Current password incorrect.');
+
+            // Hash & Save New Password
+            user.password = await bcrypt.hash(newPassword, 10);
+            await user.save();
+            
+            socket.emit('profileUpdateSuccess', 'Password changed successfully!');
+        } catch (e) {
+            console.error(e);
+            socket.emit('authError', 'Failed to update password.');
+        }
+    });
+
     // --- STATE TOGGLES (Secure Unstuck) ---
     socket.on('toggleGhost', (state) => {
         const lid = socketToLobby.get(socket.id);
@@ -616,6 +639,59 @@ io.on('connection', (socket) => {
             category: "BUG", details: data.details, lobbyId: socketToLobby.get(socket.id) || 'Unknown', chatLogs: []
         });
         await report.save();
+    });
+
+    // ==============================
+    // ADMIN DASHBOARD LOGIC
+    // ==============================
+    socket.on('reqAdminData', async () => {
+        // SECURITY CHECK: Only 11CHASE11 can access
+        if (!socket.data.isAuthenticated || socket.data.name !== '11CHASE11') {
+            return socket.emit('adminError', 'ACCESS DENIED: You are not 11CHASE11.');
+        }
+
+        try {
+            // 1. Get Stats
+            const totalUsers = await User.countDocuments({});
+            // Sum of all games played by all users
+            const gamesAgg = await User.aggregate([{ $group: { _id: null, total: { $sum: "$gamesPlayed" } } }]);
+            const totalGames = gamesAgg.length > 0 ? gamesAgg[0].total : 0;
+            
+            // 2. Get Reports (Player Reports)
+            const playerReports = await Report.find({ category: { $ne: 'BUG' } }).sort({ timestamp: -1 }).limit(20);
+            
+            // 3. Get Bugs
+            const bugReports = await Report.find({ category: 'BUG' }).sort({ timestamp: -1 }).limit(20);
+
+            socket.emit('resAdminData', {
+                stats: { users: totalUsers, games: totalGames },
+                reports: playerReports,
+                bugs: bugReports
+            });
+        } catch (e) {
+            console.error(e);
+            socket.emit('adminError', 'Database Error');
+        }
+    });
+
+    socket.on('adminBanUser', async (targetName) => {
+        if (socket.data.name !== '11CHASE11') return;
+        try {
+            const user = await User.findOneAndUpdate({ username: targetName }, { isBanned: true });
+            if (user) {
+                // Kick them if they are online
+                // (Advanced: find their socket and disconnect them, but for now DB ban prevents login)
+                socket.emit('adminActionSuccess', `Banned user: ${targetName}`);
+            } else {
+                socket.emit('adminError', 'User not found');
+            }
+        } catch (e) { socket.emit('adminError', 'Ban failed'); }
+    });
+
+    socket.on('adminDeleteReport', async (reportId) => {
+        if (socket.data.name !== '11CHASE11') return;
+        await Report.findByIdAndDelete(reportId);
+        socket.emit('adminActionSuccess', 'Report deleted');
     });
 
     // --- LOBBY LOGIC ---

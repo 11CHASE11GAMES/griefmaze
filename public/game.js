@@ -17,6 +17,11 @@ const centerText = document.getElementById('center-text');
 const btnMenuStart = document.getElementById('btn-menu-start');
 const btnHostRestart = document.getElementById('btn-host-restart');
 const btnUnstuck = document.getElementById('btn-unstuck');
+const modalEditProfile = document.getElementById('modal-edit-profile');
+const btnOpenEdit = document.getElementById('btn-open-edit');
+const btnSavePass = document.getElementById('btn-save-pass');
+const inputOldPass = document.getElementById('edit-old-pass');
+const inputNewPass = document.getElementById('edit-new-pass');
 
 // NEW: Guest Promo Box
 const guestPromo = document.getElementById('guest-promo');
@@ -424,6 +429,33 @@ function createItem(id, type, x, z) {
 // ==========================================
 // 5. INPUTS & HANDLERS
 // ==========================================
+
+// --- PROFILE EDITOR HANDLERS ---
+btnOpenEdit.addEventListener('click', () => {
+    modalProfile.style.display = 'none'; // Close main profile
+    modalEditProfile.style.display = 'flex'; // Open editor
+});
+
+btnSavePass.addEventListener('click', () => {
+    const oldP = inputOldPass.value;
+    const newP = inputNewPass.value;
+    
+    if(!oldP || !newP) {
+        alert("Please fill in both fields.");
+        return;
+    }
+    
+    socket.emit('changePassword', { oldPassword: oldP, newPassword: newP });
+});
+
+// Generic Success Listener
+socket.on('profileUpdateSuccess', (msg) => {
+    alert(msg);
+    inputOldPass.value = '';
+    inputNewPass.value = '';
+    modalEditProfile.style.display = 'none';
+    modalProfile.style.display = 'flex'; // Return to main profile
+});
 
 // --- AUTH HANDLERS ---
 accountBtn.addEventListener('click', () => {
