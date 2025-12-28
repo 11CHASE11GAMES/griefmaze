@@ -16,6 +16,10 @@ const centerAnnouncement = document.getElementById('center-announcement');
 const centerText = document.getElementById('center-text');
 const btnMenuStart = document.getElementById('btn-menu-start');
 const btnHostRestart = document.getElementById('btn-host-restart');
+const btnUnstuck = document.getElementById('btn-unstuck');
+
+// NEW: Guest Promo Box
+const guestPromo = document.getElementById('guest-promo');
 
 // Chat Elements
 const chatBox = document.getElementById('chat-box');
@@ -138,11 +142,12 @@ let isFrozen = false;
 let iAmHost = false;
 let isChatting = false; 
 let isTabOpen = false;
+let serverRoundState = 'waiting'; 
 
 // Auth State
 let isLoggedIn = false;
 let currentUserData = { coins: 0, wins: 0, gamesPlayed: 0 };
-let authenticatedUsername = null; // Secure username for dev checks
+let authenticatedUsername = null; 
 
 // Timers
 let powerupTimerInterval = null; 
@@ -337,6 +342,7 @@ function createItem(id, type, x, z) {
         const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 16), mat);
         group.add(sphere);
 
+        // Particles
         const particleCount = 50;
         const particleGeo = new THREE.BufferGeometry();
         const positions = new Float32Array(particleCount * 3);
@@ -432,6 +438,13 @@ accountBtn.addEventListener('click', () => {
     }
 });
 
+// GUEST PROMO CLICK HANDLER
+if (guestPromo) {
+    guestPromo.addEventListener('click', () => {
+        modalAccount.style.display = 'flex';
+    });
+}
+
 btnDoLogin.addEventListener('click', () => {
     const u = authUser.value; const p = authPass.value;
     if(u && p) socket.emit('login', { username: u, password: p });
@@ -446,10 +459,14 @@ btnLogout.addEventListener('click', () => {
     isLoggedIn = false; 
     myName = "Guest"; 
     currentUserData = { coins: 0, wins: 0, gamesPlayed: 0 };
-    authenticatedUsername = null; // Clear secure username
+    authenticatedUsername = null; 
     accountStatus.innerText = "Login / Sign Up"; 
     modalProfile.style.display = 'none';
     localStorage.removeItem('gm_session'); 
+    
+    // Show Guest Promo Again
+    if(guestPromo) guestPromo.style.display = 'block';
+    
     alert("Logged out.");
 });
 
@@ -467,17 +484,21 @@ socket.on('accountDeleted', () => {
     authenticatedUsername = null;
     accountStatus.innerText = "Login / Sign Up"; 
     modalProfile.style.display = 'none';
+    if(guestPromo) guestPromo.style.display = 'block';
     alert("Account deleted.");
 });
 
 socket.on('authSuccess', (data) => {
     isLoggedIn = true; 
     myName = data.username; 
-    authenticatedUsername = data.username; // Store secure username
+    authenticatedUsername = data.username; 
     currentUserData = data;
     nameInput.value = myName;
     accountStatus.innerText = myName + " (" + data.coins + " 💰)";
     modalAccount.style.display = 'none';
+    
+    // Hide Guest Promo
+    if(guestPromo) guestPromo.style.display = 'none';
     
     if(data.token) {
         localStorage.setItem('gm_session', data.token);
@@ -494,6 +515,21 @@ socket.on('statsUpdate', (data) => {
 socket.on('authError', (msg) => {
     alert("Error: " + msg);
 });
+
+// --- HELPER TO UPDATE BUTTONS BASED ON STATE ---
+function updateHostButtons() {
+    if (iAmHost) {
+        btnHostRestart.style.display = 'block';
+        if (serverRoundState === 'manual') {
+            btnMenuStart.style.display = 'block';
+        } else {
+            btnMenuStart.style.display = 'none';
+        }
+    } else {
+        btnHostRestart.style.display = 'none';
+        btnMenuStart.style.display = 'none';
+    }
+}
 
 // --- MENU & MODAL HANDLERS ---
 findGameBtn.addEventListener('click', () => {
@@ -560,6 +596,12 @@ btnHostRestart.addEventListener('click', () => {
     if(confirm("Restart the game for everyone?")) {
         socket.emit('restartGame');
     }
+});
+
+// NEW UNSTUCK BUTTON
+btnUnstuck.addEventListener('click', () => {
+    socket.emit('requestUnstuck');
+    controls.lock(); // Return to game
 });
 
 btnJoinCode.addEventListener('click', () => {
@@ -686,6 +728,12 @@ function addChatMessage(data) {
     }
 
     chatBox.appendChild(msg);
+    
+    // LIMIT CHAT TO 50 MESSAGES
+    while (chatBox.children.length > 50) {
+        chatBox.removeChild(chatBox.firstChild);
+    }
+
     chatBox.scrollTop = chatBox.scrollHeight;
 }
 
@@ -765,6 +813,25 @@ function updateTabList() {
     }
 }
 
+// --- NEW HELPER: SETUP ENTER KEY LOGIC ---
+function setupEnterKey(inputId, actionBtnId) {
+    const input = document.getElementById(inputId);
+    const btn = document.getElementById(actionBtnId);
+    if(input && btn) {
+        input.addEventListener('keyup', (e) => {
+            if (e.key === 'Enter') btn.click();
+        });
+    }
+}
+
+// SETUP ENTER KEYBINDS
+setupEnterKey('auth-password', 'btn-do-login');
+setupEnterKey('join-code-input', 'btn-submit-code');
+setupEnterKey('name-input', 'find-game-btn');
+['host-max-players', 'host-map-size', 'host-pre-time', 'host-game-time'].forEach(id => {
+    setupEnterKey(id, 'btn-start-host');
+});
+
 const onKeyDown = function (event) {
     if (document.activeElement === chatInput || document.activeElement === reportDetails) {
         if (event.code === 'Enter' && document.activeElement === chatInput) {
@@ -807,7 +874,7 @@ const onKeyDown = function (event) {
                     isTabOpen = true;
                     updateTabList();
                     tabList.style.display = 'flex';
-                    controls.unlock(); // Free mouse for clicking
+                    controls.unlock(); 
                 }
             }
             break;
@@ -840,6 +907,8 @@ const onKeyDown = function (event) {
                     isFlying = !isFlying;
                     flyHud.style.display = isFlying ? 'block' : 'none';
                     velocity.y = 0; 
+                    // Sync State for Unstuck Safety
+                    socket.emit('toggleFly', isFlying);
                 }
             }
             break;
@@ -873,8 +942,12 @@ const onKeyDown = function (event) {
                 const myGridX = Math.floor(camera.position.x / UNIT_SIZE);
                 const myGridZ = Math.floor(camera.position.z / UNIT_SIZE);
 
+                // --- BRICK SAFETY CHECK (Client-Side) ---
                 if (hasBrick) {
-                    if ((gridX !== myGridX || gridZ !== myGridZ) && gridX > 0 && gridX < MAP_SIZE && gridZ > 0 && gridZ < MAP_SIZE && map[gridZ][gridX] === 0) {
+                    // Prevent placing on self (simple check)
+                    if (gridX === myGridX && gridZ === myGridZ) {
+                        // Optional: show "Cannot place here" UI
+                    } else if ((gridX !== myGridX || gridZ !== myGridZ) && gridX > 0 && gridX < MAP_SIZE && gridZ > 0 && gridZ < MAP_SIZE && map[gridZ][gridX] === 0) {
                         socket.emit('placeWall', {x: gridX, z: gridZ});
                         hasBrick = false;
                         brickHud.style.display = 'none';
@@ -1093,6 +1166,10 @@ socket.on('initialGameState', (data) => {
     // Check if I am Host
     iAmHost = (data.hostId === mySocketId);
     
+    // NEW: Update buttons immediately
+    serverRoundState = data.roundState;
+    updateHostButtons();
+
     if (iAmHost) btnHostRestart.style.display = 'block';
     else btnHostRestart.style.display = 'none';
 
@@ -1142,8 +1219,7 @@ socket.on('initialGameState', (data) => {
         isFrozen = true;
         centerAnnouncement.style.display = 'flex'; 
         centerText.innerText = "WAITING FOR HOST TO START";
-        if(iAmHost) btnMenuStart.style.display = 'block'; 
-        else btnMenuStart.style.display = 'none';
+        // REMOVED manual DOM logic here, handled by updateHostButtons
         gameTimerDisplay.style.display = 'none';
     } 
     else if(data.roundState === 'preround') {
@@ -1202,10 +1278,13 @@ socket.on('itemRemoved', (itemId) => {
 });
 
 socket.on('roundState', (data) => {
+    // Sync local state
+    serverRoundState = data.state;
+    updateHostButtons(); // Ensure button appears immediately
+
     if (data.state === 'waiting') {
         isFrozen = true;
         centerAnnouncement.style.display = 'flex';
-        btnMenuStart.style.display = 'none';
         centerText.innerText = "WAITING FOR PLAYERS...";
         gameTimerDisplay.style.display = 'none';
         
@@ -1216,18 +1295,15 @@ socket.on('roundState', (data) => {
         gameTimerDisplay.style.display = 'none';
         
         if(iAmHost) {
-            btnMenuStart.style.display = 'block';
             // Force menu open if manual state triggered
             mainMenu.style.display = 'flex';
             controls.unlock();
         }
-        else btnMenuStart.style.display = 'none';
 
     } else if (data.state === 'preround') {
         isFrozen = true;
         gameTimerDisplay.style.display = 'none';
         centerAnnouncement.style.display = 'flex';
-        btnMenuStart.style.display = 'none';
         
         let timeLeft = data.duration;
         centerText.innerText = `STARTS IN: ${timeLeft}`;
@@ -1247,7 +1323,6 @@ socket.on('roundState', (data) => {
     } else if (data.state === 'playing') {
         isFrozen = false;
         centerAnnouncement.style.display = 'none';
-        btnMenuStart.style.display = 'none';
         
         // Force close menu if user was waiting
         if(mainMenu.style.display === 'flex' && !controls.isLocked) {
@@ -1458,8 +1533,12 @@ socket.on('playerTeleported', (data) => {
     if (data.id === mySocketId) {
         camera.position.set(data.x, data.y, data.z);
         velocity.set(0, 0, 0); 
-        swapHud.style.display = 'block';
-        setTimeout(() => { swapHud.style.display = 'none'; }, 2500);
+        
+        // FIX: Only show SWAPPED if reason is swap
+        if (data.reason === 'swap') {
+            swapHud.style.display = 'block';
+            setTimeout(() => { swapHud.style.display = 'none'; }, 2500);
+        }
     } else if (otherPlayers[data.id]) {
         otherPlayers[data.id].position.set(data.x, data.y - CAM_HEIGHT, data.z);
         otherPlayers[data.id].userData.lastPos.copy(otherPlayers[data.id].position);
@@ -1577,6 +1656,9 @@ function activateSuperJump() {
 
 function activateGhostMode() {
     isGhost = true;
+    // Notify Server
+    socket.emit('toggleGhost', true);
+
     ghostHud.style.display = 'block';
     let secondsLeft = 3;
     ghostTimer.innerText = secondsLeft;
@@ -1588,6 +1670,8 @@ function activateGhostMode() {
         if (secondsLeft <= 0) {
             clearInterval(ghostInterval);
             isGhost = false;
+            socket.emit('toggleGhost', false); // Notify Server
+
             ghostHud.style.display = 'none';
             
             // Unstuck Logic

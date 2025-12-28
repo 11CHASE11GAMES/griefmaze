@@ -17,7 +17,6 @@ mongoose.connect(MONGO_URI)
 
 // --- SCHEMAS ---
 
-// 1. User Schema
 const userSchema = new mongoose.Schema({
     username: { type: String, required: true, unique: true },
     password: { type: String, required: true },
@@ -32,7 +31,6 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', userSchema);
 
-// 2. Report Schema
 const reportSchema = new mongoose.Schema({
     reporter: String,
     reported: String,
@@ -47,6 +45,8 @@ const reportSchema = new mongoose.Schema({
 const Report = mongoose.model('Report', reportSchema);
 
 app.use(express.static('public'));
+app.use('/build', express.static(__dirname + '/node_modules/three/build'));
+app.use('/jsm', express.static(__dirname + '/node_modules/three/examples/jsm'));
 
 // ==========================================
 // GAME LOBBY CLASS
@@ -73,21 +73,98 @@ class GameLobby {
         this.MIN_ITEM_DIST = 5 * this.UNIT_SIZE;
 
         this.timerInterval = null;
+        this.safetyInterval = null;
         this.timeLeft = 0;
         this.state = 'waiting'; 
         
-        this.setupMap(); 
+        this.setupMap();
+        
+        // Start Safety Loop
+        this.safetyInterval = setInterval(() => this.checkStuckPlayers(), 1000);
+    }
+
+    checkStuckPlayers() {
+        if (!this.gameMap || this.gameMap.length === 0) return;
+
+        Object.keys(this.players).forEach(id => {
+            const p = this.players[id];
+            
+            if (p.isGhost || p.isFlying) return;
+
+            const gx = Math.floor(p.x / this.UNIT_SIZE);
+            const gz = Math.floor(p.z / this.UNIT_SIZE);
+
+            if (gx < 0 || gx >= this.settings.mapSize || gz < 0 || gz >= this.settings.mapSize) return;
+
+            if (this.gameMap[gz][gx] === 1) {
+                this.findSafeSpotAndTeleport(id, gx, gz);
+            }
+        });
+    }
+
+    forceUnstuckPlayer(id) {
+        const p = this.players[id];
+        if (!p) return;
+
+        const gx = Math.floor(p.x / this.UNIT_SIZE);
+        const gz = Math.floor(p.z / this.UNIT_SIZE);
+
+        if (gx < 0 || gx >= this.settings.mapSize || gz < 0 || gz >= this.settings.mapSize) {
+            this.doTeleport(id, 4.5, 4.5); 
+            return;
+        }
+
+        if (this.gameMap[gz][gx] === 0) {
+            const centerX = (gx * this.UNIT_SIZE) + (this.UNIT_SIZE / 2);
+            const centerZ = (gz * this.UNIT_SIZE) + (this.UNIT_SIZE / 2);
+            this.doTeleport(id, centerX, centerZ);
+        } else {
+            this.findSafeSpotAndTeleport(id, gx, gz);
+        }
+    }
+
+    findSafeSpotAndTeleport(id, gx, gz) {
+        const neighbors = [
+            {x: gx+1, z: gz}, {x: gx-1, z: gz}, 
+            {x: gx, z: gz+1}, {x: gx, z: gz-1},
+            {x: gx+1, z: gz+1}, {x: gx-1, z: gz-1}, {x: gx+1, z: gz-1}, {x: gx-1, z: gz+1}
+        ];
+
+        let safeSpot = null;
+        for (const n of neighbors) {
+            if (n.x > 0 && n.x < this.settings.mapSize && n.z > 0 && n.z < this.settings.mapSize) {
+                if (this.gameMap[n.z][n.x] === 0) {
+                    safeSpot = n;
+                    break;
+                }
+            }
+        }
+
+        if (safeSpot) {
+            const newX = (safeSpot.x * this.UNIT_SIZE) + (this.UNIT_SIZE / 2);
+            const newZ = (safeSpot.z * this.UNIT_SIZE) + (this.UNIT_SIZE / 2);
+            this.doTeleport(id, newX, newZ);
+        } else {
+            this.doTeleport(id, 4.5, 4.5);
+        }
+    }
+
+    doTeleport(id, x, z) {
+        if(this.players[id]) {
+            this.players[id].x = x;
+            this.players[id].z = z;
+            io.to(this.id).emit('playerTeleported', { 
+                id: id, x: x, y: this.players[id].y, z: z, reason: 'unstuck' 
+            });
+        }
     }
 
     getPlayerCount() { return Object.keys(this.players).length; }
     hasSpace() { return this.getPlayerCount() < this.settings.maxPlayers; }
 
-    // --- NAME GENERATION LOGIC ---
     getUniqueName(baseName, excludeSocketId = null) {
         let newName = baseName;
         let counter = 1;
-        
-        // Get list of current names in lobby
         const currentNames = Object.values(this.players)
             .filter(p => p.playerId !== excludeSocketId)
             .map(p => p.name);
@@ -105,38 +182,20 @@ class GameLobby {
         let pName = userData.name || "Guest";
         const isAuth = userData.isAuthenticated || false;
 
-        // --- NAME PRIORITY LOGIC ---
-        // If the new player is Authenticated, check if a Guest is holding their name.
         if (isAuth) {
-            // Find a squatter (someone with same name who is NOT authenticated)
             const squatterId = Object.keys(this.players).find(id => 
-                this.players[id].name === pName && 
-                !this.players[id].isAuthenticated
+                this.players[id].name === pName && !this.players[id].isAuthenticated
             );
 
             if (squatterId) {
-                // Rename the squatter
                 const oldName = this.players[squatterId].name;
-                // Generate a new unique name for the squatter (e.g., "Bob 1")
-                // We exclude the NEW socket ID, but include the squatter's ID in check to ensure uniqueness against others
                 const newGuestName = this.getUniqueName(oldName, null); 
-                
                 this.players[squatterId].name = newGuestName;
-                
-                // Notify clients of rename
-                io.to(this.id).emit('updatePlayerName', { 
-                    id: squatterId, 
-                    name: newGuestName 
-                });
-                
-                // System log
-                this.logAndBroadcast(`${oldName} was renamed to ${newGuestName} (Reserved Name).`, 'system');
+                io.to(this.id).emit('updatePlayerName', { id: squatterId, name: newGuestName });
+                this.broadcastSystemMessage(`${oldName} was renamed to ${newGuestName} (Reserved Name).`, 'system');
             }
         }
 
-        // Now calculate name for new player. 
-        // If we renamed the squatter above, pName is now free. 
-        // If pName is taken by ANOTHER auth user, getUniqueName handles the numbering.
         pName = this.getUniqueName(pName, socket.id);
 
         this.players[socket.id] = {
@@ -144,11 +203,12 @@ class GameLobby {
             playerId: socket.id,
             name: pName,
             isTrapped: false,
+            isGhost: false,
+            isFlying: false,
             isAuthenticated: isAuth,
             dbId: userData.dbId || null
         };
 
-        // Send Initial State
         socket.emit('initialGameState', {
             map: this.gameMap,
             items: this.activeItems,
@@ -163,7 +223,6 @@ class GameLobby {
         });
 
         socket.to(this.id).emit('newPlayer', this.players[socket.id]);
-        
         this.logAndBroadcast(`${pName} joined the game.`, 'join');
 
         if (this.settings.preRoundTime > 0 && this.state === 'waiting' && this.getPlayerCount() >= 2) {
@@ -192,9 +251,14 @@ class GameLobby {
                 this.hostId = null;
             }
         }
+        
+        if (this.getPlayerCount() === 0) {
+            clearInterval(this.timerInterval);
+            clearInterval(this.safetyInterval);
+        }
     }
 
-    logAndBroadcast(text, type='system', senderName=null) {
+    logAndBroadcast(text, type='system', senderName=null, senderId=null) {
         const timestamp = new Date().toLocaleTimeString();
         let logEntry = `[${timestamp}] `;
         if (senderName) logEntry += `${senderName}: ${text}`;
@@ -203,7 +267,16 @@ class GameLobby {
         this.chatHistory.push(logEntry);
         if (this.chatHistory.length > 50) this.chatHistory.shift(); 
 
-        io.to(this.id).emit('chatMessage', { type: type, text: text, name: senderName, id: (type === 'chat' ? null : null) }); 
+        io.to(this.id).emit('chatMessage', { 
+            type: type, 
+            text: text, 
+            name: senderName, 
+            id: senderId 
+        }); 
+    }
+
+    broadcastSystemMessage(text, type='system') {
+        io.to(this.id).emit('chatMessage', { type: type, text: text });
     }
 
     // --- MAZE & LOGIC ---
@@ -318,15 +391,13 @@ class GameLobby {
     }
 
     startNewRound() {
-        console.log(`Lobby ${this.id}: New Round Prep`);
         if(this.timerInterval) clearInterval(this.timerInterval);
-
         this.setupMap();
-
         Object.keys(this.players).forEach(id => {
             this.players[id].x = 4.5; this.players[id].y = 1.6; 
             this.players[id].z = 4.5; this.players[id].rotation = 0; 
             this.players[id].isTrapped = false;
+            this.players[id].isGhost = false;
         });
 
         if (this.settings.preRoundTime === 0) {
@@ -347,12 +418,10 @@ class GameLobby {
     startPreRound() {
         this.state = 'preround';
         this.timeLeft = this.settings.preRoundTime;
-        
         io.to(this.id).emit('newRound', { map: this.gameMap, items: this.activeItems, players: this.players, exit: this.exitConfig });
         io.to(this.id).emit('roundState', { state: 'preround', duration: this.timeLeft });
 
         if(this.timerInterval) clearInterval(this.timerInterval);
-        
         this.timerInterval = setInterval(() => {
             this.timeLeft--;
             if(this.timeLeft <= 0) {
@@ -381,10 +450,8 @@ class GameLobby {
     handleTimeout() {
         clearInterval(this.timerInterval);
         this.isRoundActive = false;
-
         let bestDist = Infinity;
         let winners = [];
-
         Object.keys(this.players).forEach(pid => {
             const p = this.players[pid];
             const gx = Math.floor(p.x / this.UNIT_SIZE);
@@ -436,17 +503,14 @@ class GameLobby {
         });
 
         setTimeout(() => {
-            if (this.settings.preRoundTime === 0) {
-                this.startNewRound();
-            } else {
-                this.startNewRound();
-            }
+            if (this.settings.preRoundTime === 0) this.startNewRound();
+            else this.startNewRound();
         }, 15000);
     }
 }
 
 // ==========================================
-// GLOBAL STATE
+// GLOBAL STATE & SOCKET
 // ==========================================
 const lobbies = new Map(); 
 const socketToLobby = new Map(); 
@@ -459,9 +523,7 @@ function createLobby(settings, isPrivate) {
     return lobby;
 }
 
-// --- 4. SOCKET LOGIC ---
 io.on('connection', (socket) => {
-    console.log('User Connected:', socket.id);
     socket.data = { name: "Guest", isAuthenticated: false, dbId: null };
 
     // --- AUTH ---
@@ -510,46 +572,48 @@ io.on('connection', (socket) => {
         }
     });
 
+    // --- STATE TOGGLES (Secure Unstuck) ---
+    socket.on('toggleGhost', (state) => {
+        const lid = socketToLobby.get(socket.id);
+        const lobby = lobbies.get(lid);
+        if(lobby && lobby.players[socket.id]) {
+            lobby.players[socket.id].isGhost = state;
+        }
+    });
+
+    socket.on('toggleFly', (state) => {
+        const lid = socketToLobby.get(socket.id);
+        const lobby = lobbies.get(lid);
+        if(lobby && lobby.players[socket.id]) {
+            lobby.players[socket.id].isFlying = state;
+        }
+    });
+
+    socket.on('requestUnstuck', () => {
+        const lid = socketToLobby.get(socket.id);
+        const lobby = lobbies.get(lid);
+        if(lobby) lobby.forceUnstuckPlayer(socket.id);
+    });
+
     // --- REPORTING SYSTEM ---
     socket.on('reportPlayer', async (data) => {
         if (!data || !data.targetId || !data.category) return;
-        
         const lobbyId = socketToLobby.get(socket.id);
         const lobby = lobbies.get(lobbyId);
-        
-        let logs = [];
-        if (lobby) {
-            logs = lobby.chatHistory.slice(-50); 
-        }
-
-        console.log(`[REPORT] ${socket.data.name} reported ${data.targetName} (${data.category})`);
-
+        let logs = lobby ? lobby.chatHistory.slice(-50) : [];
         const report = new Report({
-            reporter: socket.data.name,
-            reported: data.targetName,
-            reportedId: data.targetId,
-            category: data.category,
-            details: data.details || "",
-            lobbyId: lobbyId || 'Unknown',
-            chatLogs: logs
+            reporter: socket.data.name, reported: data.targetName, reportedId: data.targetId,
+            category: data.category, details: data.details || "", lobbyId: lobbyId || 'Unknown', chatLogs: logs
         });
-
         await report.save();
         socket.emit('reportReceived');
     });
 
-    // --- BUG REPORT SYSTEM ---
     socket.on('bugReport', async (data) => {
         if (!data || !data.details) return;
-        console.log(`[BUG] ${socket.data.name} reported a bug: ${data.details}`);
         const report = new Report({
-            reporter: socket.data.name,
-            reported: "SYSTEM",
-            reportedId: "SYSTEM",
-            category: "BUG",
-            details: data.details,
-            lobbyId: socketToLobby.get(socket.id) || 'Unknown',
-            chatLogs: []
+            reporter: socket.data.name, reported: "SYSTEM", reportedId: "SYSTEM",
+            category: "BUG", details: data.details, lobbyId: socketToLobby.get(socket.id) || 'Unknown', chatLogs: []
         });
         await report.save();
     });
@@ -562,7 +626,7 @@ io.on('connection', (socket) => {
             if(lobby) {
                 socket.leave(lid);
                 lobby.removePlayer(socket.id);
-                if(lobby.getPlayerCount() === 0) { lobbies.delete(lid); console.log(`Destroyed Lobby: ${lid}`); }
+                if(lobby.getPlayerCount() === 0) { lobbies.delete(lid); }
             }
             socketToLobby.delete(socket.id);
         }
@@ -580,9 +644,7 @@ io.on('connection', (socket) => {
     }
 
     socket.on('joinGame', (name) => {
-        if (name && name.trim().length > 0) {
-            socket.data.name = name.trim().substring(0, 12);
-        }
+        if (name && name.trim().length > 0) socket.data.name = name.trim().substring(0, 12);
         const lid = socketToLobby.get(socket.id);
         if (lid) {
             const lobby = lobbies.get(lid);
@@ -601,18 +663,12 @@ io.on('connection', (socket) => {
         for (const [id, l] of lobbies) {
             if (!l.isPrivate && l.hasSpace()) {
                 if (options && options.forceNew && id === currentLobbyId) continue; 
-                targetLobby = l;
-                break;
+                targetLobby = l; break;
             }
         }
         if (!targetLobby) {
-            const defaultSettings = { 
-                maxPlayers: 8, 
-                mapSize: 61, 
-                preRoundTime: 20, 
-                gameTime: 300, 
-                allowedItems: { boot:true, brick:true, trap:true, pepper:true, orb:true, swap:true, hindered:true, scrambler:true } 
-            };
+            // FIXED DEFAULT: preRoundTime: 10
+            const defaultSettings = { maxPlayers: 8, mapSize: 61, preRoundTime: 10, gameTime: 300, allowedItems: { boot:true, brick:true, trap:true, pepper:true, orb:true, swap:true, hindered:true, scrambler:true } };
             targetLobby = createLobby(defaultSettings, false);
         }
         joinLobby(socket, targetLobby);
@@ -620,14 +676,15 @@ io.on('connection', (socket) => {
 
     socket.on('hostGame', (data) => {
         leaveCurrentLobby(socket);
-        let preTime = parseInt(data.preRoundTime);
-        if (isNaN(preTime)) preTime = 20;
-
+        let preTime = parseInt(data.preRoundTime); 
+        // FIXED DEFAULT: 10 seconds fallback
+        if (isNaN(preTime)) preTime = 10; 
+        
         const settings = {
             maxPlayers: Math.min(Math.max(parseInt(data.maxPlayers)||8, 2), 20),
             mapSize: Math.min(Math.max(parseInt(data.mapSize)||61, 21), 101),
-            preRoundTime: Math.min(Math.max(preTime, 0), 60), 
-            gameTime: parseInt(data.gameTime), 
+            preRoundTime: Math.min(Math.max(preTime, 0), 60),
+            gameTime: parseInt(data.gameTime),
             allowedItems: data.allowedItems || {}
         };
         if(settings.mapSize % 2 === 0) settings.mapSize++;
@@ -639,37 +696,29 @@ io.on('connection', (socket) => {
     socket.on('joinCode', (code) => {
         const lobbyId = code.toUpperCase();
         const lobby = lobbies.get(lobbyId);
-        if (lobby && lobby.hasSpace()) {
-            leaveCurrentLobby(socket);
-            joinLobby(socket, lobby);
-        } else {
-            socket.emit('authError', 'Lobby not found or full');
-        }
+        if (lobby && lobby.hasSpace()) { leaveCurrentLobby(socket); joinLobby(socket, lobby); }
+        else socket.emit('authError', 'Lobby not found or full');
     });
 
     socket.on('forceStartGame', () => {
         const lid = socketToLobby.get(socket.id);
         const lobby = lobbies.get(lid);
-        if (lobby && lobby.hostId === socket.id && lobby.state === 'manual') {
-            lobby.startGame();
-        }
+        if (lobby && lobby.hostId === socket.id && lobby.state === 'manual') lobby.startGame();
     });
 
     socket.on('restartGame', () => {
         const lid = socketToLobby.get(socket.id);
         const lobby = lobbies.get(lid);
-        if (lobby && lobby.hostId === socket.id) {
-            lobby.startNewRound();
-        }
+        if (lobby && lobby.hostId === socket.id) lobby.startNewRound();
     });
 
-    // --- CHAT & GAMEPLAY ---
+    // --- GAMEPLAY ---
     socket.on('chatMessage', (msg) => {
         const lid = socketToLobby.get(socket.id);
         const lobby = lobbies.get(lid);
         if (lobby && msg && msg.trim().length > 0) {
             const cleanMsg = msg.trim().substring(0, 100);
-            lobby.logAndBroadcast(cleanMsg, 'chat', lobby.players[socket.id].name);
+            lobby.logAndBroadcast(cleanMsg, 'chat', lobby.players[socket.id].name, socket.id);
         }
     });
 
@@ -701,18 +750,9 @@ io.on('connection', (socket) => {
             lobby.activeItems.splice(idx, 1);
             io.to(lid).emit('itemRemoved', id);
             
-            if (type === 'orb') {
-                socket.to(lid).emit('darknessTriggered');
-                lobby.logAndBroadcast(`${pName} used Dark Orb!`, 'system');
-            }
-            else if (type === 'hindered') {
-                socket.to(lid).emit('controlsInverted');
-                lobby.logAndBroadcast(`${pName} used Hinder Potion!`, 'system');
-            }
-            else if (type === 'scrambler') {
-                socket.to(lid).emit('radarScrambled');
-                lobby.logAndBroadcast(`${pName} scrambled the radar!`, 'system');
-            }
+            if (type === 'orb') { socket.to(lid).emit('darknessTriggered'); lobby.logAndBroadcast(`${pName} used Dark Orb!`, 'system'); }
+            else if (type === 'hindered') { socket.to(lid).emit('controlsInverted'); lobby.logAndBroadcast(`${pName} used Hinder Potion!`, 'system'); }
+            else if (type === 'scrambler') { socket.to(lid).emit('radarScrambled'); lobby.logAndBroadcast(`${pName} scrambled the radar!`, 'system'); }
             else if (type === 'swap') {
                 const others = Object.keys(lobby.players).filter(pid => pid !== socket.id);
                 if (others.length) {
@@ -721,8 +761,8 @@ io.on('connection', (socket) => {
                     const p1 = lobby.players[socket.id], p2 = lobby.players[targetId];
                     const tmp = {x:p1.x, y:p1.y, z:p1.z};
                     p1.x = p2.x; p1.y = p2.y; p1.z = p2.z; p2.x = tmp.x; p2.y = tmp.y; p2.z = tmp.z;
-                    io.to(lid).emit('playerTeleported', {id: socket.id, x:p1.x, y:p1.y, z:p1.z});
-                    io.to(lid).emit('playerTeleported', {id: targetId, x:p2.x, y:p2.y, z:p2.z});
+                    io.to(lid).emit('playerTeleported', {id: socket.id, x:p1.x, y:p1.y, z:p1.z, reason: 'swap'});
+                    io.to(lid).emit('playerTeleported', {id: targetId, x:p2.x, y:p2.y, z:p2.z, reason: 'swap'});
                     lobby.logAndBroadcast(`${pName} swapped with ${targetName}!`, 'system');
                 }
             }
@@ -732,10 +772,18 @@ io.on('connection', (socket) => {
     socket.on('placeWall', (d) => {
         const lid = socketToLobby.get(socket.id);
         const lobby = lobbies.get(lid);
+        let safe = true;
         if(lobby) {
-            lobby.gameMap[d.z][d.x] = 1;
-            io.to(lid).emit('wallPlaced', d);
-            setTimeout(() => { if(lobby.gameMap[d.z]) lobby.gameMap[d.z][d.x]=0; }, 10000);
+            Object.values(lobby.players).forEach(p => {
+                 const px = Math.floor(p.x / lobby.UNIT_SIZE);
+                 const pz = Math.floor(p.z / lobby.UNIT_SIZE);
+                 if (px === d.x && pz === d.z) safe = false;
+            });
+            if(safe) {
+                lobby.gameMap[d.z][d.x] = 1;
+                io.to(lid).emit('wallPlaced', d);
+                setTimeout(() => { if(lobby.gameMap[d.z]) lobby.gameMap[d.z][d.x]=0; }, 10000);
+            }
         }
     });
 
