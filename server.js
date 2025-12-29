@@ -16,7 +16,6 @@ mongoose.connect(MONGO_URI)
     .catch(err => console.log('❌ MongoDB Error:', err));
 
 // --- SCHEMAS ---
-
 const userSchema = new mongoose.Schema({
     username: { type: String, required: true, unique: true },
     password: { type: String, required: true },
@@ -25,10 +24,10 @@ const userSchema = new mongoose.Schema({
     wins: { type: Number, default: 0 },
     gamesPlayed: { type: Number, default: 0 },
     isBanned: { type: Boolean, default: false },
-    skins: { type: [String], default: ['default'] },
+    // Only 'default' is given initially. Players must "Unlock" beta_merch in the shop.
+    skins: { type: [String], default: ['default'] }, 
     equippedSkin: { type: String, default: 'default' }
 });
-
 const User = mongoose.model('User', userSchema);
 
 const reportSchema = new mongoose.Schema({
@@ -41,22 +40,17 @@ const reportSchema = new mongoose.Schema({
     chatLogs: [String],
     timestamp: { type: Date, default: Date.now }
 });
-
 const Report = mongoose.model('Report', reportSchema);
 
-// --- GLOBAL STATS SCHEMA (Updated) ---
+// --- GLOBAL STATS SCHEMA ---
 const globalStatsSchema = new mongoose.Schema({
     id: { type: String, default: 'global' },
-    totalConnections: { type: Number, default: 0 }, // Total site visits
-    totalGamesPlayed: { type: Number, default: 0 }, // Total rounds finished
-    lobbiesCreated: {
-        public: { type: Number, default: 0 },
-        private: { type: Number, default: 0 }
-    }
+    totalConnections: { type: Number, default: 0 },
+    totalGamesPlayed: { type: Number, default: 0 },
+    lobbiesCreated: { public: { type: Number, default: 0 }, private: { type: Number, default: 0 } }
 });
 const GlobalStats = mongoose.model('GlobalStats', globalStatsSchema);
 
-// Helper to safely update stats
 async function incrementGlobalStat(field, amount = 1) {
     try {
         const update = {};
@@ -68,6 +62,22 @@ async function incrementGlobalStat(field, amount = 1) {
 app.use(express.static('public'));
 app.use('/build', express.static(__dirname + '/node_modules/three/build'));
 app.use('/jsm', express.static(__dirname + '/node_modules/three/examples/jsm'));
+
+// --- HELPER: Angle Interpolation ---
+function lerpAngle(start, end, amount) {
+    let diff = end - start;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    return start + diff * amount;
+}
+
+// --- BOT NAMES ---
+const BOT_NAMES = [
+    "SpeedRunner", "MazeMaster", "Glitch", "Shadow", "Ghost", "Viper", "Noob123", "ProGamer", 
+    "Alex", "Sam", "Jordan", "Casey", "Riley", "Eagle", "Wolf", "Bear", "Tiger", "Runner", 
+    "Walker", "Dasher", "Seeker", "Hider", "MazeKing", "QueenBee", "Pixel", "Voxel", 
+    "LagSpike", "404NotFound", "Null", "Undefined", "System", "Admin_Fake"
+];
 
 // ==========================================
 // GAME LOBBY CLASS
@@ -95,13 +105,514 @@ class GameLobby {
 
         this.timerInterval = null;
         this.safetyInterval = null;
+        this.botInterval = null;
         this.timeLeft = 0;
         this.state = 'waiting'; 
         
         this.setupMap();
         
-        // Start Safety Loop
+        if (!this.isPrivate) {
+            const botCount = Math.floor(Math.random() * 3) + 3; 
+            for(let i=0; i<botCount; i++) this.addBot();
+        }
+
         this.safetyInterval = setInterval(() => this.checkStuckPlayers(), 1000);
+        this.botInterval = setInterval(() => this.updateBots(), 100); 
+    }
+
+    // --- SMART BOT LOGIC ---
+    
+    findPath(startX, startZ, targetX, targetZ) {
+        const queue = [[{x: startX, z: startZ}]];
+        const visited = new Set();
+        visited.add(`${startX},${startZ}`);
+        let iterations = 0;
+        
+        while (queue.length > 0 && iterations < 2000) {
+            iterations++;
+            const path = queue.shift();
+            const curr = path[path.length - 1];
+
+            if (curr.x === targetX && curr.z === targetZ) {
+                return path.slice(1); 
+            }
+
+            const neighbors = [
+                {x: curr.x+1, z: curr.z}, {x: curr.x-1, z: curr.z},
+                {x: curr.x, z: curr.z+1}, {x: curr.x, z: curr.z-1}
+            ];
+
+            for (const n of neighbors) {
+                if (n.x <= 0 || n.x >= this.settings.mapSize || n.z <= 0 || n.z >= this.settings.mapSize) continue;
+                if (this.gameMap[n.z][n.x] === 1) continue;
+                
+                const key = `${n.x},${n.z}`;
+                if (!visited.has(key)) {
+                    visited.add(key);
+                    const newPath = [...path, n];
+                    queue.push(newPath);
+                }
+            }
+        }
+        return null; 
+    }
+
+    assignBotTarget(bot) {
+        const bgx = Math.floor(bot.x / this.UNIT_SIZE);
+        const bgz = Math.floor(bot.z / this.UNIT_SIZE);
+
+        let target = null;
+
+        // 1. ITEMS (High Priority)
+        if (this.activeItems.length > 0 && Math.random() > 0.4) {
+            let closest = null;
+            let minLen = 9999;
+            for(let i=0; i<4; i++) {
+                const item = this.activeItems[Math.floor(Math.random() * this.activeItems.length)];
+                if(!item) continue;
+                const igx = Math.floor(item.x / this.UNIT_SIZE);
+                const igz = Math.floor(item.z / this.UNIT_SIZE);
+                const path = this.findPath(bgx, bgz, igx, igz);
+                if (path && path.length < minLen) {
+                    minLen = path.length;
+                    closest = path;
+                }
+            }
+            if (closest) target = closest;
+        }
+
+        // 2. LONG DISTANCE (Attempt > 8 blocks)
+        if (!target) {
+            let attempts = 0;
+            while (!target && attempts < 15) {
+                attempts++;
+                const rx = Math.floor(Math.random() * (this.settings.mapSize - 2)) + 1;
+                const rz = Math.floor(Math.random() * (this.settings.mapSize - 2)) + 1;
+                if (this.gameMap[rz][rx] === 1) continue;
+                if (rx === bot.lastGx && rz === bot.lastGz) continue;
+
+                const dist = Math.abs(rx - bgx) + Math.abs(rz - bgz);
+                if (dist < 8) continue;
+
+                const path = this.findPath(bgx, bgz, rx, rz);
+                if (path && path.length > 5) target = path;
+            }
+        }
+
+        // 3. MEDIUM DISTANCE
+        if (!target) {
+            let attempts = 0;
+            while (!target && attempts < 15) {
+                attempts++;
+                const rx = Math.floor(Math.random() * (this.settings.mapSize - 2)) + 1;
+                const rz = Math.floor(Math.random() * (this.settings.mapSize - 2)) + 1;
+                if (this.gameMap[rz][rx] === 1) continue;
+                if (rx === bot.lastGx && rz === bot.lastGz) continue;
+
+                const dist = Math.abs(rx - bgx) + Math.abs(rz - bgz);
+                if (dist < 3) continue;
+
+                const path = this.findPath(bgx, bgz, rx, rz);
+                if (path && path.length >= 2) target = path;
+            }
+        }
+
+        // 4. FALLBACK
+        if (!target) {
+            const neighbors = [{x:bgx+1,z:bgz}, {x:bgx-1,z:bgz}, {x:bgx,z:bgz+1}, {x:bgx,z:bgz-1}];
+            const valid = neighbors.filter(n => 
+                this.gameMap[n.z] && 
+                this.gameMap[n.z][n.x] === 0 &&
+                !(n.x === bot.lastGx && n.z === bot.lastGz) 
+            );
+            
+            if(valid.length > 0) {
+                target = [valid[Math.floor(Math.random()*valid.length)]];
+            } else {
+                const allValid = neighbors.filter(n => this.gameMap[n.z] && this.gameMap[n.z][n.x] === 0);
+                if(allValid.length > 0) target = [allValid[Math.floor(Math.random()*allValid.length)]];
+            }
+        }
+
+        if (target) {
+            bot.currentPath = target;
+            if(bot.currentPath.length > 0) {
+                const node = bot.currentPath[0];
+                const wiggleX = (Math.random() - 0.5) * 0.5; 
+                const wiggleZ = (Math.random() - 0.5) * 0.5;
+                
+                bot.targetX = (node.x * this.UNIT_SIZE) + (this.UNIT_SIZE/2) + wiggleX;
+                bot.targetZ = (node.z * this.UNIT_SIZE) + (this.UNIT_SIZE/2) + wiggleZ;
+                
+                bot.lastGx = bgx;
+                bot.lastGz = bgz;
+            }
+        }
+    }
+
+    addBot() {
+        const botId = 'BOT_' + crypto.randomBytes(4).toString('hex');
+        
+        let name;
+        if (Math.random() > 0.5) {
+            const currentNames = Object.values(this.players).map(p => p.name);
+            const availableNames = BOT_NAMES.filter(n => !currentNames.includes(n));
+            name = availableNames.length > 0 ? availableNames[Math.floor(Math.random() * availableNames.length)] : this.getUniqueName("Guest");
+        } else {
+            name = this.getUniqueName("Guest");
+        }
+
+        const botSkins = ['default', 'beta_merch'];
+        const randomSkin = botSkins[Math.floor(Math.random() * botSkins.length)];
+
+        const sx = 4.5;
+        const sz = 4.5;
+
+        this.players[botId] = {
+            x: sx, y: 1.6, z: sz, rotation: 0,
+            playerId: botId,
+            name: name,
+            isBot: true,
+            isTrapped: false,
+            isGhost: false,
+            isFlying: false,
+            isAuthenticated: false,
+            targetX: sx, targetZ: sz,
+            moveSpeed: 60.0,
+            currentPath: [],
+            vy: 0, 
+            lookOffset: 0,
+            lastX: sx, lastZ: sz, stuckTicks: 0,
+            lastGx: 1, lastGz: 1,
+            skin: randomSkin 
+        };
+        
+        this.assignBotTarget(this.players[botId]);
+        io.to(this.id).emit('newPlayer', this.players[botId]);
+    }
+
+    removeBot() {
+        const botIds = Object.keys(this.players).filter(id => this.players[id].isBot);
+        if (botIds.length > 0) {
+            const removeId = botIds[botIds.length - 1]; 
+            delete this.players[removeId];
+            io.to(this.id).emit('playerDisconnected', removeId);
+        }
+    }
+
+    checkBotCollision(x, z) {
+        if (!this.gameMap) return false;
+        const radius = 0.4; 
+        
+        const points = [
+            { x: x + radius, z: z + radius },
+            { x: x - radius, z: z + radius },
+            { x: x + radius, z: z - radius },
+            { x: x - radius, z: z - radius }
+        ];
+
+        for (const p of points) {
+            const gx = Math.floor(p.x / this.UNIT_SIZE);
+            const gz = Math.floor(p.z / this.UNIT_SIZE);
+
+            if (gx < 0 || gx >= this.settings.mapSize || gz < 0 || gz >= this.settings.mapSize) return true;
+            if (this.gameMap[gz][gx] === 1) return true;
+        }
+        return false;
+    }
+
+    updateBots() {
+        if (this.state !== 'playing') return;
+        if (!this.gameMap || this.gameMap.length === 0) return;
+
+        Object.keys(this.players).forEach(id => {
+            const p = this.players[id];
+            if (!p.isBot || p.isTrapped) return;
+
+            // STUCK MONITOR
+            const movedDist = Math.abs(p.x - p.lastX) + Math.abs(p.z - p.lastZ);
+            
+            let dx = p.targetX - p.x;
+            let dz = p.targetZ - p.z;
+            const targetAngle = Math.atan2(dx, dz) + Math.PI; 
+            
+            let angleDiff = Math.abs(targetAngle - p.rotation);
+            while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+            while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+            angleDiff = Math.abs(angleDiff);
+
+            if (movedDist < 0.1 && angleDiff < 0.5) {
+                p.stuckTicks++;
+            } else {
+                p.stuckTicks = 0;
+            }
+            p.lastX = p.x;
+            p.lastZ = p.z;
+
+            if (p.stuckTicks > 20) { 
+                const gx = Math.floor(p.x / this.UNIT_SIZE);
+                const gz = Math.floor(p.z / this.UNIT_SIZE);
+                
+                const neighbors = [{x:gx+1,z:gz}, {x:gx-1,z:gz}, {x:gx,z:gz+1}, {x:gx,z:gz-1}];
+                const valid = neighbors.filter(n => this.gameMap[n.z] && this.gameMap[n.z][n.x] === 0);
+                
+                if (valid.length > 0) {
+                    const jumpTo = valid[Math.floor(Math.random() * valid.length)];
+                    p.x = (jumpTo.x * this.UNIT_SIZE) + (this.UNIT_SIZE/2);
+                    p.z = (jumpTo.z * this.UNIT_SIZE) + (this.UNIT_SIZE/2);
+                } else {
+                    p.x = (gx * this.UNIT_SIZE) + (this.UNIT_SIZE/2);
+                    p.z = (gz * this.UNIT_SIZE) + (this.UNIT_SIZE/2);
+                }
+
+                p.currentPath = [];
+                p.stuckTicks = 0;
+                this.assignBotTarget(p); 
+                io.to(this.id).emit('playerTeleported', { id: id, x: p.x, y: p.y, z: p.z, reason: 'stuck' });
+                return;
+            }
+
+            // DYNAMIC OBSTACLE CHECK
+            const targetGx = Math.floor(p.targetX / this.UNIT_SIZE);
+            const targetGz = Math.floor(p.targetZ / this.UNIT_SIZE);
+            if (targetGx > 0 && targetGx < this.settings.mapSize && targetGz > 0 && targetGz < this.settings.mapSize) {
+                if (this.gameMap[targetGz][targetGx] === 1) {
+                    p.x = Math.round(p.x / this.UNIT_SIZE) * this.UNIT_SIZE + (this.UNIT_SIZE/2);
+                    p.z = Math.round(p.z / this.UNIT_SIZE) * this.UNIT_SIZE + (this.UNIT_SIZE/2);
+                    p.targetX = p.x;
+                    p.targetZ = p.z;
+                    p.currentPath = [];
+                    this.assignBotTarget(p);
+                    return; 
+                }
+            }
+
+            // ITEM CHECK
+            for (let i = this.activeItems.length - 1; i >= 0; i--) {
+                const item = this.activeItems[i];
+                const distToItem = Math.sqrt(Math.pow(item.x - p.x, 2) + Math.pow(item.z - p.z, 2));
+                if (distToItem < 1.5) {
+                    this.handleItemCollection(item.id, id);
+                }
+            }
+
+            // TRAP CHECK
+            for (let i = this.placedTraps.length - 1; i >= 0; i--) {
+                const trap = this.placedTraps[i];
+                const distToTrap = Math.sqrt(Math.pow(trap.x - p.x, 2) + Math.pow(trap.z - p.z, 2));
+                if (distToTrap < 1.0) {
+                    this.handleTrapTrigger(trap.id, id); 
+                    return;
+                }
+            }
+
+            // PHYSICS
+            const GRAVITY = 30.0;
+            const JUMP_FORCE = 12.0;
+            const delta = 0.1;
+
+            if (p.y <= 1.6 && Math.random() < 0.02) {
+                p.vy = JUMP_FORCE; 
+            }
+            
+            p.vy -= GRAVITY * delta; 
+            p.y += p.vy * delta;
+            if (p.y < 1.6) {
+                p.y = 1.6;
+                p.vy = 0;
+            }
+
+            // ROTATION & MOVEMENT
+            let dist = Math.sqrt(dx*dx + dz*dz); 
+
+            if (dist < 0.4) {
+                if (p.currentPath.length > 0) p.currentPath.shift();
+
+                if (p.currentPath.length > 0) {
+                    const node = p.currentPath[0];
+                    const wiggleX = (Math.random() - 0.5) * 0.5;
+                    const wiggleZ = (Math.random() - 0.5) * 0.5;
+                    p.targetX = (node.x * this.UNIT_SIZE) + (this.UNIT_SIZE/2) + wiggleX;
+                    p.targetZ = (node.z * this.UNIT_SIZE) + (this.UNIT_SIZE/2) + wiggleZ;
+                } else {
+                    this.assignBotTarget(p);
+                }
+                
+                dx = p.targetX - p.x;
+                dz = p.targetZ - p.z;
+                dist = Math.sqrt(dx*dx + dz*dz);
+            }
+
+            if (dist > 0.1) {
+                const newTargetAngle = Math.atan2(dx, dz) + Math.PI; 
+                
+                if(Math.random() < 0.1) p.lookOffset = (Math.random() - 0.5) * 0.5;
+                
+                const rotSpeed = 0.2 + Math.random() * 0.3;
+                p.rotation = lerpAngle(p.rotation, newTargetAngle + p.lookOffset, rotSpeed);
+
+                let moveDist = (p.moveSpeed * delta * 0.1); 
+
+                let currentAngleDiff = Math.abs(newTargetAngle - p.rotation);
+                while (currentAngleDiff > Math.PI) currentAngleDiff -= Math.PI * 2;
+                while (currentAngleDiff < -Math.PI) currentAngleDiff += Math.PI * 2;
+                currentAngleDiff = Math.abs(currentAngleDiff);
+
+                if (currentAngleDiff > 0.8) { 
+                    moveDist *= 0.1; 
+                }
+
+                const forwardX = -Math.sin(p.rotation);
+                const forwardZ = -Math.cos(p.rotation);
+
+                if (!this.checkBotCollision(p.x + (forwardX * moveDist), p.z)) {
+                    p.x += forwardX * moveDist;
+                }
+                if (!this.checkBotCollision(p.x, p.z + (forwardZ * moveDist))) {
+                    p.z += forwardZ * moveDist;
+                }
+
+                io.to(this.id).emit('playerMoved', p);
+            }
+        });
+    }
+
+    // --- SHARED ITEM LOGIC ---
+    handleItemCollection(itemId, playerId) {
+        const idx = this.activeItems.findIndex(i => i.id === itemId);
+        if (idx === -1) return;
+
+        const player = this.players[playerId];
+        if (!player) return;
+
+        const type = this.activeItems[idx].type;
+        const pName = player.name;
+        
+        this.activeItems.splice(idx, 1);
+        io.to(this.id).emit('itemRemoved', itemId);
+
+        const sock = io.sockets.sockets.get(playerId);
+
+        if (type === 'orb') { 
+            if (sock) sock.to(this.id).emit('darknessTriggered');
+            else io.to(this.id).emit('darknessTriggered');
+            this.logAndBroadcast(`${pName} used Dark Orb!`, 'system'); 
+        }
+        else if (type === 'hindered') { 
+            if (sock) sock.to(this.id).emit('controlsInverted');
+            else io.to(this.id).emit('controlsInverted');
+            this.logAndBroadcast(`${pName} used Hinder Potion!`, 'system'); 
+        }
+        else if (type === 'scrambler') { 
+            if (sock) sock.to(this.id).emit('radarScrambled');
+            else io.to(this.id).emit('radarScrambled');
+            this.logAndBroadcast(`${pName} scrambled the radar!`, 'system'); 
+        }
+        else if (type === 'swap') {
+            const others = Object.keys(this.players).filter(pid => pid !== playerId);
+            if (others.length) {
+                const targetId = others[Math.floor(Math.random()*others.length)];
+                const targetName = this.players[targetId].name;
+                const p1 = this.players[playerId], p2 = this.players[targetId];
+                const tmp = {x:p1.x, y:p1.y, z:p1.z};
+                p1.x = p2.x; p1.y = p2.y; p1.z = p2.z; p2.x = tmp.x; p2.y = tmp.y; p2.z = tmp.z;
+                
+                if(p1.isBot) { p1.targetX = p1.x; p1.targetZ = p1.z; p1.currentPath = []; }
+                if(p2.isBot) { p2.targetX = p2.x; p2.targetZ = p2.z; p2.currentPath = []; }
+
+                io.to(this.id).emit('playerTeleported', {id: playerId, x:p1.x, y:p1.y, z:p1.z, reason: 'swap'});
+                io.to(this.id).emit('playerTeleported', {id: targetId, x:p2.x, y:p2.y, z:p2.z, reason: 'swap'});
+                this.logAndBroadcast(`${pName} swapped with ${targetName}!`, 'system');
+            }
+        }
+
+        if (player.isBot) {
+            const gx = Math.floor(player.x / this.UNIT_SIZE);
+            const gz = Math.floor(player.z / this.UNIT_SIZE);
+
+            if (type === 'brick') {
+                const neighbors = [{x:gx+1,z:gz}, {x:gx-1,z:gz}, {x:gx,z:gz+1}, {x:gx,z:gz-1}];
+                const valid = neighbors.filter(n => this.gameMap[n.z] && this.gameMap[n.z][n.x] === 0);
+                if(valid.length > 0) {
+                    const spot = valid[Math.floor(Math.random()*valid.length)];
+                    this.placeWall(spot.x, spot.z);
+                }
+            }
+            else if (type === 'trap') {
+                this.placeTrap(player.x, player.z, playerId);
+            }
+            else if (type === 'pepper') {
+                player.isGhost = true;
+                io.to(this.id).emit('toggleGhost', true);
+                setTimeout(() => { 
+                    if(this.players[playerId]) this.players[playerId].isGhost = false; 
+                }, 3000);
+            }
+        }
+    }
+
+    // --- SHARED TRAP LOGIC ---
+    handleTrapTrigger(trapId, playerId) {
+        const idx = this.placedTraps.findIndex(t => t.id === trapId);
+        if(idx !== -1) {
+            io.to(this.id).emit('removeTrap', trapId);
+            this.placedTraps.splice(idx, 1);
+
+            if(this.players[playerId]) {
+                const player = this.players[playerId];
+                player.isTrapped = true;
+                player.vy = 0; 
+
+                if(player.isBot) {
+                    player.currentPath = [];
+                    player.targetX = player.x;
+                    player.targetZ = player.z;
+                }
+
+                io.to(this.id).emit('playerTrapped', playerId);
+
+                setTimeout(()=>{
+                    if(this.players[playerId]) {
+                        this.players[playerId].isTrapped = false;
+                        io.to(this.id).emit('playerUntrapped', playerId);
+                        if(this.players[playerId].isBot) {
+                            this.assignBotTarget(this.players[playerId]);
+                        }
+                    }
+                }, 10000);
+            }
+        }
+    }
+
+    placeWall(x, z) {
+        if(x > 0 && x < this.settings.mapSize && z > 0 && z < this.settings.mapSize) {
+            let safe = true;
+            Object.values(this.players).forEach(p => {
+                const px = Math.floor(p.x / this.UNIT_SIZE);
+                const pz = Math.floor(p.z / this.UNIT_SIZE);
+                if (px === x && pz === z) safe = false;
+            });
+
+            if(safe) {
+                this.gameMap[z][x] = 1;
+                io.to(this.id).emit('wallPlaced', {x, z});
+                setTimeout(() => { if(this.gameMap[z]) this.gameMap[z][x]=0; }, 10000);
+            }
+        }
+    }
+
+    placeTrap(x, z, ownerId) {
+        const id = `${ownerId}_${Date.now()}`;
+        this.placedTraps.push({ mesh: null, id: id, x: x, z: z }); 
+        io.to(this.id).emit('trapPlaced', {x, z, id});
+    }
+
+    getHumanCount() {
+        return Object.values(this.players).filter(p => !p.isBot).length;
+    }
+
+    getBotCount() {
+        return Object.values(this.players).filter(p => p.isBot).length;
     }
 
     checkStuckPlayers() {
@@ -109,8 +620,7 @@ class GameLobby {
 
         Object.keys(this.players).forEach(id => {
             const p = this.players[id];
-            
-            if (p.isGhost || p.isFlying) return;
+            if (p.isGhost || p.isFlying || p.isBot) return; 
 
             const gx = Math.floor(p.x / this.UNIT_SIZE);
             const gz = Math.floor(p.z / this.UNIT_SIZE);
@@ -200,8 +710,16 @@ class GameLobby {
     addPlayer(socket, userData) {
         if (!this.hostId) this.hostId = socket.id;
 
+        // BOT LOGIC: If bots exist, remove one to make room
+        if (this.getBotCount() > 0) {
+            this.removeBot();
+        }
+
         let pName = userData.name || "Guest";
         const isAuth = userData.isAuthenticated || false;
+
+        let pSkin = 'default';
+        if (userData.equippedSkin) pSkin = userData.equippedSkin;
 
         if (isAuth) {
             const squatterId = Object.keys(this.players).find(id => 
@@ -227,7 +745,9 @@ class GameLobby {
             isGhost: false,
             isFlying: false,
             isAuthenticated: isAuth,
-            dbId: userData.dbId || null
+            isBot: false,
+            dbId: userData.dbId || null,
+            skin: pSkin
         };
 
         socket.emit('initialGameState', {
@@ -255,14 +775,21 @@ class GameLobby {
     }
 
     removePlayer(socketId) {
-        const pName = this.players[socketId] ? this.players[socketId].name : "Unknown";
+        const p = this.players[socketId];
+        if(!p) return;
+        const pName = p.name;
         delete this.players[socketId];
         
         io.to(this.id).emit('playerDisconnected', socketId);
         this.logAndBroadcast(`${pName} left the game.`, 'leave');
 
+        // BOT LOGIC: If room has humans left but < 5 bots, add one back
+        if (this.getHumanCount() > 0 && this.getBotCount() < 5 && !this.isPrivate) {
+            this.addBot();
+        }
+
         if (socketId === this.hostId) {
-            const remainingIds = Object.keys(this.players);
+            const remainingIds = Object.keys(this.players).filter(id => !this.players[id].isBot);
             if (remainingIds.length > 0) {
                 this.hostId = remainingIds[Math.floor(Math.random() * remainingIds.length)];
                 io.to(this.id).emit('hostAssigned', this.hostId);
@@ -273,9 +800,13 @@ class GameLobby {
             }
         }
         
-        if (this.getPlayerCount() === 0) {
+        // ZOMBIE PREVENTION: If no humans, destroy lobby
+        if (this.getHumanCount() === 0) {
             clearInterval(this.timerInterval);
             clearInterval(this.safetyInterval);
+            clearInterval(this.botInterval);
+            // Will be deleted by lobby manager loop check
+            console.log('Destroyed Lobby:', this.id);
         }
     }
 
@@ -419,6 +950,18 @@ class GameLobby {
             this.players[id].z = 4.5; this.players[id].rotation = 0; 
             this.players[id].isTrapped = false;
             this.players[id].isGhost = false;
+            // Reset Bot Targets
+            if(this.players[id].isBot) {
+                this.players[id].targetX = 4.5;
+                this.players[id].targetZ = 4.5;
+                this.players[id].currentPath = [];
+                this.assignBotTarget(this.players[id]); 
+            }
+            
+            // FIX: Force visual reset immediately
+            io.to(this.id).emit('playerTeleported', { 
+                id: id, x: 4.5, y: 1.6, z: 4.5, reason: 'reset' 
+            });
         });
 
         if (this.settings.preRoundTime === 0) {
@@ -475,6 +1018,8 @@ class GameLobby {
         let winners = [];
         Object.keys(this.players).forEach(pid => {
             const p = this.players[pid];
+            if(p.isBot) return; // Bots can't win via timeout check (simplification)
+            
             const gx = Math.floor(p.x / this.UNIT_SIZE);
             const gz = Math.floor(p.z / this.UNIT_SIZE);
             if(gx >= 0 && gx < this.settings.mapSize && gz >= 0 && gz < this.settings.mapSize) {
@@ -489,7 +1034,6 @@ class GameLobby {
     }
 
     endRound(winnerIds, winningDistance = 0) {
-        // GLOBAL STAT: Count total games played
         incrementGlobalStat('totalGamesPlayed');
 
         if(this.timerInterval) clearInterval(this.timerInterval);
@@ -515,7 +1059,18 @@ class GameLobby {
             const sock = io.sockets.sockets.get(wid);
             if(sock && sock.data.isAuthenticated && sock.data.dbId) {
                  User.findByIdAndUpdate(sock.data.dbId, { $inc: { wins: 1, coins: 50 } }, { new: true })
-                    .then(u => sock.emit('statsUpdate', { coins: u.coins, wins: u.wins, gamesPlayed: u.gamesPlayed }));
+                    .then(u => {
+                        if (u) {
+                            sock.emit('statsUpdate', { coins: u.coins, wins: u.wins, gamesPlayed: u.gamesPlayed });
+                            // Check for Blueprint skin unlock
+                            if (u.gamesPlayed >= 50 && !u.skins.includes('blueprint')) {
+                                u.skins.push('blueprint');
+                                u.save();
+                                sock.emit('skinUnlocked', 'blueprint');
+                                sock.emit('chatMessage', { type: 'system', text: 'You unlocked the "Blueprint" Skin!' });
+                            }
+                        }
+                    });
             }
         });
 
@@ -548,10 +1103,10 @@ function createLobby(settings, isPrivate) {
 }
 
 io.on('connection', (socket) => {
-    // GLOBAL STAT: Count every connection
     incrementGlobalStat('totalConnections');
     
-    socket.data = { name: "Guest", isAuthenticated: false, dbId: null };
+    // DEFAULT DATA (Initialize with default skin)
+    socket.data = { name: "Guest", isAuthenticated: false, dbId: null, equippedSkin: 'default' };
 
     // --- AUTH ---
     socket.on('signup', async ({ username, password }) => {
@@ -560,10 +1115,23 @@ io.on('connection', (socket) => {
             if (existing) return socket.emit('authError', 'Username exists');
             const hashed = await bcrypt.hash(password, 10);
             const token = crypto.randomBytes(32).toString('hex');
-            const newUser = new User({ username, password: hashed, sessionToken: token });
+            
+            // --- NEW: GIVE BETA SKIN ON SIGNUP ---
+            const newUser = new User({ 
+                username, 
+                password: hashed, 
+                sessionToken: token,
+                skins: ['default'], // CHANGED: 'beta_merch' REMOVED to force unlock in shop
+                equippedSkin: 'default'
+            });
             await newUser.save();
-            socket.data.name = newUser.username; socket.data.isAuthenticated = true; socket.data.dbId = newUser._id;
-            socket.emit('authSuccess', { username: newUser.username, coins: 0, stats: { wins: 0, gamesPlayed: 0 }, token });
+            
+            socket.data.name = newUser.username; 
+            socket.data.isAuthenticated = true; 
+            socket.data.dbId = newUser._id;
+            socket.data.equippedSkin = newUser.equippedSkin; // Load Skin
+
+            socket.emit('authSuccess', { username: newUser.username, coins: 0, stats: { wins: 0, gamesPlayed: 0 }, token, skins: newUser.skins, equippedSkin: newUser.equippedSkin });
         } catch (e) { socket.emit('authError', 'Server Error'); }
     });
 
@@ -576,8 +1144,13 @@ io.on('connection', (socket) => {
             
             const token = crypto.randomBytes(32).toString('hex');
             user.sessionToken = token; await user.save();
-            socket.data.name = user.username; socket.data.isAuthenticated = true; socket.data.dbId = user._id;
-            socket.emit('authSuccess', { username: user.username, coins: user.coins, stats: { wins: user.wins, gamesPlayed: user.gamesPlayed }, token });
+            
+            socket.data.name = user.username; 
+            socket.data.isAuthenticated = true; 
+            socket.data.dbId = user._id;
+            socket.data.equippedSkin = user.equippedSkin; // Load Skin
+
+            socket.emit('authSuccess', { username: user.username, coins: user.coins, stats: { wins: user.wins, gamesPlayed: user.gamesPlayed }, token, skins: user.skins, equippedSkin: user.equippedSkin });
         } catch (e) { socket.emit('authError', 'Login Failed'); }
     });
 
@@ -585,10 +1158,54 @@ io.on('connection', (socket) => {
         try {
             const user = await User.findOne({ sessionToken: token });
             if (user && !user.isBanned) {
-                socket.data.name = user.username; socket.data.isAuthenticated = true; socket.data.dbId = user._id;
-                socket.emit('authSuccess', { username: user.username, coins: user.coins, stats: { wins: user.wins, gamesPlayed: user.gamesPlayed }, token });
+                socket.data.name = user.username; 
+                socket.data.isAuthenticated = true; 
+                socket.data.dbId = user._id;
+                socket.data.equippedSkin = user.equippedSkin; // Load Skin
+
+                socket.emit('authSuccess', { username: user.username, coins: user.coins, stats: { wins: user.wins, gamesPlayed: user.gamesPlayed }, token, skins: user.skins, equippedSkin: user.equippedSkin });
             }
         } catch (e) { console.error(e); }
+    });
+
+    // --- SKIN UNLOCK LOGIC ---
+    socket.on('buySkin', async (skinId) => {
+        if(!socket.data.isAuthenticated || !socket.data.dbId) return;
+        
+        try {
+            const user = await User.findById(socket.data.dbId);
+            if(!user) return;
+
+            // Check Requirements
+            let canBuy = false;
+            if (skinId === 'blueprint') {
+                if (user.gamesPlayed >= 50) canBuy = true;
+            } else if (skinId === 'beta_merch') {
+                // Free for now
+                canBuy = true; 
+            }
+
+            if (canBuy && !user.skins.includes(skinId)) {
+                user.skins.push(skinId);
+                await user.save();
+                socket.emit('skinUnlocked', skinId); // Notify Client
+                socket.emit('chatMessage', { type: 'system', text: `Unlocked skin: ${skinId}!` });
+            }
+        } catch(e) { console.error(e); }
+    });
+
+    socket.on('equipSkin', async (skinId) => {
+        if(!socket.data.isAuthenticated || !socket.data.dbId) return;
+        
+        try {
+            const user = await User.findById(socket.data.dbId);
+            if(user && user.skins.includes(skinId)) {
+                user.equippedSkin = skinId;
+                await user.save();
+                socket.data.equippedSkin = skinId;
+                socket.emit('skinEquipped', skinId);
+            }
+        } catch(e) { console.error(e); }
     });
 
     socket.on('deleteAccount', async () => {
@@ -632,7 +1249,6 @@ io.on('connection', (socket) => {
             const totalUsers = await User.countDocuments({});
             const globalStats = await GlobalStats.findOne({ id: 'global' }) || {};
             
-            // Get reports with chatLogs included
             const playerReports = await Report.find({ category: { $ne: 'BUG' } }).sort({ timestamp: -1 }).limit(20);
             const bugReports = await Report.find({ category: 'BUG' }).sort({ timestamp: -1 }).limit(20);
 
@@ -724,7 +1340,15 @@ io.on('connection', (socket) => {
             if(lobby) {
                 socket.leave(lid);
                 lobby.removePlayer(socket.id);
-                if(lobby.getPlayerCount() === 0) { lobbies.delete(lid); }
+                // Check if empty of HUMANS
+                if(lobby.getHumanCount() === 0) { 
+                    lobbies.delete(lid);
+                    console.log('Destroyed Lobby:', lid); // FIX: Log destruction
+                    // Clear intervals explicitly if not handled in removePlayer
+                    if(lobby.timerInterval) clearInterval(lobby.timerInterval);
+                    if(lobby.safetyInterval) clearInterval(lobby.safetyInterval);
+                    if(lobby.botInterval) clearInterval(lobby.botInterval);
+                }
             }
             socketToLobby.delete(socket.id);
         }
@@ -735,7 +1359,9 @@ io.on('connection', (socket) => {
         socketToLobby.set(socket.id, lobby.id);
         if(socket.data.isAuthenticated && socket.data.dbId) {
             User.findByIdAndUpdate(socket.data.dbId, { $inc: { gamesPlayed: 1 } }).then(u => {
-                if(u) socket.emit('statsUpdate', { coins: u.coins, wins: u.wins, gamesPlayed: u.gamesPlayed });
+                if(u) {
+                    socket.emit('statsUpdate', { coins: u.coins, wins: u.wins, gamesPlayed: u.gamesPlayed });
+                }
             });
         }
         lobby.addPlayer(socket, socket.data);
@@ -765,10 +1391,8 @@ io.on('connection', (socket) => {
             }
         }
         if (!targetLobby) {
-            // FIXED DEFAULT: preRoundTime: 10
             const defaultSettings = { maxPlayers: 8, mapSize: 61, preRoundTime: 10, gameTime: 300, allowedItems: { boot:true, brick:true, trap:true, pepper:true, orb:true, swap:true, hindered:true, scrambler:true } };
             targetLobby = createLobby(defaultSettings, false);
-            // GLOBAL STAT: Count Public Lobby
             incrementGlobalStat('lobbiesCreated.public');
         }
         joinLobby(socket, targetLobby);
@@ -777,7 +1401,6 @@ io.on('connection', (socket) => {
     socket.on('hostGame', (data) => {
         leaveCurrentLobby(socket);
         let preTime = parseInt(data.preRoundTime); 
-        // FIXED DEFAULT: 10 seconds fallback
         if (isNaN(preTime)) preTime = 10; 
         
         const settings = {
@@ -790,7 +1413,6 @@ io.on('connection', (socket) => {
         if(settings.mapSize % 2 === 0) settings.mapSize++;
         const lobby = createLobby(settings, data.isPrivate);
         
-        // GLOBAL STAT: Count Lobby
         if(data.isPrivate) incrementGlobalStat('lobbiesCreated.private');
         else incrementGlobalStat('lobbiesCreated.public');
 
@@ -847,67 +1469,27 @@ io.on('connection', (socket) => {
     socket.on('itemCollected', (id) => {
         const lid = socketToLobby.get(socket.id);
         const lobby = lobbies.get(lid);
-        if(!lobby) return;
-        const idx = lobby.activeItems.findIndex(i => i.id === id);
-        if (idx !== -1) {
-            const type = lobby.activeItems[idx].type;
-            const pName = lobby.players[socket.id].name;
-            lobby.activeItems.splice(idx, 1);
-            io.to(lid).emit('itemRemoved', id);
-            
-            if (type === 'orb') { socket.to(lid).emit('darknessTriggered'); lobby.logAndBroadcast(`${pName} used Dark Orb!`, 'system'); }
-            else if (type === 'hindered') { socket.to(lid).emit('controlsInverted'); lobby.logAndBroadcast(`${pName} used Hinder Potion!`, 'system'); }
-            else if (type === 'scrambler') { socket.to(lid).emit('radarScrambled'); lobby.logAndBroadcast(`${pName} scrambled the radar!`, 'system'); }
-            else if (type === 'swap') {
-                const others = Object.keys(lobby.players).filter(pid => pid !== socket.id);
-                if (others.length) {
-                    const targetId = others[Math.floor(Math.random()*others.length)];
-                    const targetName = lobby.players[targetId].name;
-                    const p1 = lobby.players[socket.id], p2 = lobby.players[targetId];
-                    const tmp = {x:p1.x, y:p1.y, z:p1.z};
-                    p1.x = p2.x; p1.y = p2.y; p1.z = p2.z; p2.x = tmp.x; p2.y = tmp.y; p2.z = tmp.z;
-                    io.to(lid).emit('playerTeleported', {id: socket.id, x:p1.x, y:p1.y, z:p1.z, reason: 'swap'});
-                    io.to(lid).emit('playerTeleported', {id: targetId, x:p2.x, y:p2.y, z:p2.z, reason: 'swap'});
-                    lobby.logAndBroadcast(`${pName} swapped with ${targetName}!`, 'system');
-                }
-            }
-        }
+        if (lobby) lobby.handleItemCollection(id, socket.id);
     });
 
     socket.on('placeWall', (d) => {
         const lid = socketToLobby.get(socket.id);
         const lobby = lobbies.get(lid);
-        let safe = true;
-        if(lobby) {
-            Object.values(lobby.players).forEach(p => {
-                 const px = Math.floor(p.x / lobby.UNIT_SIZE);
-                 const pz = Math.floor(p.z / lobby.UNIT_SIZE);
-                 if (px === d.x && pz === d.z) safe = false;
-            });
-            if(safe) {
-                lobby.gameMap[d.z][d.x] = 1;
-                io.to(lid).emit('wallPlaced', d);
-                setTimeout(() => { if(lobby.gameMap[d.z]) lobby.gameMap[d.z][d.x]=0; }, 10000);
-            }
-        }
+        if (lobby) lobby.placeWall(d.x, d.z);
     });
 
     socket.on('placeTrap', (d) => {
         const lid = socketToLobby.get(socket.id);
         const lobby = lobbies.get(lid);
-        if(lobby) io.to(lid).emit('trapPlaced', {...d, id: `${socket.id}_${Date.now()}`});
+        if (lobby) lobby.placeTrap(d.x, d.z, socket.id);
     });
 
     socket.on('trapTriggered', (id) => {
         const lid = socketToLobby.get(socket.id);
         const lobby = lobbies.get(lid);
         if(lobby) {
-            io.to(lid).emit('removeTrap', id);
-            if(lobby.players[socket.id]) {
-                lobby.players[socket.id].isTrapped = true;
-                io.to(lid).emit('playerTrapped', socket.id);
-                setTimeout(()=>{ if(lobby.players[socket.id]) { lobby.players[socket.id].isTrapped=false; io.to(lid).emit('playerUntrapped', socket.id);} }, 10000);
-            }
+            // FIX: Use shared handler
+            lobby.handleTrapTrigger(id, socket.id);
         }
     });
 

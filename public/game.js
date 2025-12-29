@@ -2,7 +2,36 @@ import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 
 // ==========================================
-// 1. DOM ELEMENTS
+// 1. SKIN CONFIGURATION
+// ==========================================
+const SKIN_CATALOG = [
+    { 
+        id: 'default', 
+        name: 'Default', 
+        previewType: 'image', 
+        previewVal: 'textures/preview_default.png' 
+    },
+    { 
+        id: 'beta_merch', 
+        name: 'Beta Merch', 
+        previewType: 'image', 
+        previewVal: 'textures/preview_beta.png', 
+        reqType: 'free', 
+        desc: 'Free for Beta Players!' 
+    },
+    { 
+        id: 'blueprint', 
+        name: 'The Blueprint', 
+        previewType: 'image', 
+        previewVal: 'textures/preview_blueprint.png', 
+        reqType: 'games', 
+        reqVal: 50, 
+        desc: 'Unlock: Play 50 Games' 
+    }
+];
+
+// ==========================================
+// 2. DOM ELEMENTS
 // ==========================================
 const mainMenu = document.getElementById('main-menu');
 const findGameBtn = document.getElementById('find-game-btn');
@@ -23,7 +52,6 @@ const btnSavePass = document.getElementById('btn-save-pass');
 const inputOldPass = document.getElementById('edit-old-pass');
 const inputNewPass = document.getElementById('edit-new-pass');
 
-// NEW: Guest Promo Box
 const guestPromo = document.getElementById('guest-promo');
 
 // Chat Elements
@@ -117,7 +145,7 @@ const leaderboardBody = document.getElementById('leaderboard-body');
 const nextRoundTimer = document.getElementById('next-round-timer');
 
 // ==========================================
-// 2. VARIABLES & STATE
+// 3. VARIABLES & STATE
 // ==========================================
 const socket = io(); 
 const otherPlayers = {};
@@ -151,8 +179,10 @@ let serverRoundState = 'waiting';
 
 // Auth State
 let isLoggedIn = false;
-let currentUserData = { coins: 0, wins: 0, gamesPlayed: 0 };
+let currentUserData = { coins: 0, stats: { wins: 0, gamesPlayed: 0 } };
 let authenticatedUsername = null; 
+let myOwnedSkins = ['default'];
+let myEquippedSkin = 'default';
 
 // Timers
 let powerupTimerInterval = null; 
@@ -192,7 +222,7 @@ let WORLD_SIZE = MAP_SIZE * UNIT_SIZE;
 let map = null; 
 
 // ==========================================
-// 3. THREE.JS SCENE SETUP
+// 4. THREE.JS SCENE SETUP
 // ==========================================
 const scene = new THREE.Scene();
 const textureLoader = new THREE.TextureLoader();
@@ -238,7 +268,7 @@ const controls = new PointerLockControls(camera, document.body);
 camera.position.set(1 * UNIT_SIZE + (UNIT_SIZE/2), CAM_HEIGHT, 1 * UNIT_SIZE + (UNIT_SIZE/2));
 
 // ==========================================
-// 4. WORLD & ITEMS
+// 5. WORLD & ITEMS
 // ==========================================
 const wallTexture = textureLoader.load('textures/corn.jpg');
 wallTexture.colorSpace = THREE.SRGBColorSpace;
@@ -248,6 +278,10 @@ floorTexture.colorSpace = THREE.SRGBColorSpace;
 floorTexture.wrapS = THREE.RepeatWrapping;
 floorTexture.wrapT = THREE.RepeatWrapping;
 floorTexture.repeat.set(MAP_SIZE, MAP_SIZE); 
+
+// --- SKIN TEXTURE ---
+const betaShirtTexture = textureLoader.load('textures/beta_shirt.png');
+betaShirtTexture.colorSpace = THREE.SRGBColorSpace;
 
 const wallGeometry = new THREE.BoxGeometry(UNIT_SIZE, WALL_HEIGHT, UNIT_SIZE);
 const wallMaterial = new THREE.MeshStandardMaterial({ 
@@ -427,16 +461,176 @@ function createItem(id, type, x, z) {
 }
 
 // ==========================================
-// 5. INPUTS & HANDLERS
+// 6. SHOP & CUSTOMIZE LOGIC
 // ==========================================
+function populateShop() {
+    const shopContent = document.getElementById('shop-content');
+    if(!shopContent) return;
+    shopContent.innerHTML = "";
 
-// --- PROFILE EDITOR HANDLERS ---
-btnOpenEdit.addEventListener('click', () => {
-    modalProfile.style.display = 'none'; // Close main profile
-    modalEditProfile.style.display = 'flex'; // Open editor
+    SKIN_CATALOG.forEach(skin => {
+        // If I already own it, skip (it's in Customize)
+        if (myOwnedSkins.includes(skin.id)) return;
+
+        const card = document.createElement('div');
+        card.classList.add('skin-card');
+        
+        // --- VISUAL PREVIEW ---
+        const preview = document.createElement('div');
+        preview.classList.add('skin-preview');
+        
+        if (skin.previewType === 'color') {
+            preview.style.backgroundColor = skin.previewVal;
+        } else if (skin.previewType === 'image') {
+            preview.style.backgroundImage = `url('${skin.previewVal}')`;
+            preview.style.backgroundColor = '#fff';
+        }
+        
+        const title = document.createElement('h3');
+        title.innerText = skin.name;
+        
+        const desc = document.createElement('p');
+        desc.innerText = skin.desc;
+        
+        const btn = document.createElement('button');
+        btn.classList.add('btn-unlock');
+        
+        // CHECK REQUIREMENTS
+        let canUnlock = false;
+        if (skin.reqType === 'free') {
+            canUnlock = true;
+        } else if (skin.reqType === 'games') {
+            // Safe access to stats
+            if (currentUserData.stats && currentUserData.stats.gamesPlayed >= skin.reqVal) {
+                canUnlock = true;
+            }
+        }
+
+        if (canUnlock) {
+            btn.innerText = "UNLOCK";
+            btn.style.backgroundColor = "#2ecc71"; // Green
+            
+            // --- FIX: GUEST CHECK ON CLICK ---
+            btn.onclick = (e) => {
+                e.stopPropagation(); // Stop click from locking mouse
+                if (!isLoggedIn) {
+                    alert("You must be logged in to unlock skins! Sign up to save your progress.");
+                    modalShop.style.display = 'none';
+                    modalAccount.style.display = 'flex';
+                    return;
+                }
+                btn.innerText = "Processing...";
+                btn.disabled = true;
+                socket.emit('buySkin', skin.id);
+            };
+        } else {
+            btn.innerText = "LOCKED";
+            btn.disabled = true;
+            btn.style.backgroundColor = "#555";
+        }
+
+        card.appendChild(preview);
+        card.appendChild(title);
+        card.appendChild(desc);
+        card.appendChild(btn);
+        shopContent.appendChild(card);
+    });
+}
+
+function populateCustomize() {
+    const custContent = document.getElementById('cust-content');
+    if(!custContent) return;
+    custContent.innerHTML = "";
+
+    myOwnedSkins.forEach(skinId => {
+        // Find name
+        const catalogEntry = SKIN_CATALOG.find(s => s.id === skinId);
+        const name = catalogEntry ? catalogEntry.name : (skinId === 'default' ? 'Default' : skinId);
+
+        const card = document.createElement('div');
+        card.classList.add('skin-card');
+        
+        // --- VISUAL PREVIEW ---
+        const preview = document.createElement('div');
+        preview.classList.add('skin-preview');
+        
+        // Use Catalog Entry if exists, otherwise fallback to default look
+        if (catalogEntry) {
+            if (catalogEntry.previewType === 'color') {
+                preview.style.backgroundColor = catalogEntry.previewVal;
+            } else if (catalogEntry.previewType === 'image') {
+                preview.style.backgroundImage = `url('${catalogEntry.previewVal}')`;
+                preview.style.backgroundColor = '#fff';
+            }
+        } else {
+            preview.style.backgroundColor = '#3366ff';
+        }
+
+        const title = document.createElement('h3');
+        title.innerText = name;
+        
+        const btn = document.createElement('button');
+        btn.classList.add('btn-unlock');
+        
+        if (myEquippedSkin === skinId) {
+            btn.innerText = "EQUIPPED";
+            btn.disabled = true;
+            btn.style.backgroundColor = "#888";
+        } else {
+            btn.innerText = "EQUIP";
+            btn.style.backgroundColor = "#3498db";
+            btn.onclick = (e) => {
+                e.stopPropagation(); // Stop click from locking mouse
+                socket.emit('equipSkin', skinId);
+            };
+        }
+
+        card.appendChild(preview);
+        card.appendChild(title);
+        card.appendChild(btn);
+        custContent.appendChild(card);
+    });
+}
+
+// -----------------------------------------------------------
+// BUTTON LISTENERS WITH EVENT STOP PROPAGATION
+// -----------------------------------------------------------
+
+btnShop.addEventListener('click', (e) => {
+    e.stopPropagation();
+    populateShop();
+    modalShop.style.display = 'flex';
 });
 
-btnSavePass.addEventListener('click', () => {
+btnCustomize.addEventListener('click', (e) => {
+    e.stopPropagation();
+    populateCustomize();
+    modalCustomize.style.display = 'flex';
+});
+
+// Store Listeners
+socket.on('skinUnlocked', (skinId) => {
+    if(!myOwnedSkins.includes(skinId)) myOwnedSkins.push(skinId);
+    populateShop(); // Refresh
+    populateCustomize();
+    // Optional: Alert user
+    alert("Skin unlocked! Check the Skins tab to equip it.");
+});
+
+socket.on('skinEquipped', (skinId) => {
+    myEquippedSkin = skinId;
+    populateCustomize();
+});
+
+// --- PROFILE EDITOR HANDLERS ---
+btnOpenEdit.addEventListener('click', (e) => {
+    e.stopPropagation();
+    modalProfile.style.display = 'none'; 
+    modalEditProfile.style.display = 'flex'; 
+});
+
+btnSavePass.addEventListener('click', (e) => {
+    e.stopPropagation();
     const oldP = inputOldPass.value;
     const newP = inputNewPass.value;
     
@@ -458,12 +652,14 @@ socket.on('profileUpdateSuccess', (msg) => {
 });
 
 // --- AUTH HANDLERS ---
-accountBtn.addEventListener('click', () => {
+accountBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
     if (isLoggedIn) {
         profTitle.innerText = myName + "'s Profile";
         profCoins.innerText = currentUserData.coins;
-        profWins.innerText = currentUserData.stats.wins;
-        profGames.innerText = currentUserData.stats.gamesPlayed;
+        // FIX: Ensure stats exist safely
+        profWins.innerText = currentUserData.stats ? currentUserData.stats.wins : 0;
+        profGames.innerText = currentUserData.stats ? currentUserData.stats.gamesPlayed : 0;
         modalProfile.style.display = 'flex';
     } else {
         modalAccount.style.display = 'flex';
@@ -472,26 +668,34 @@ accountBtn.addEventListener('click', () => {
 
 // GUEST PROMO CLICK HANDLER
 if (guestPromo) {
-    guestPromo.addEventListener('click', () => {
+    guestPromo.addEventListener('click', (e) => {
+        e.stopPropagation();
         modalAccount.style.display = 'flex';
     });
 }
 
-btnDoLogin.addEventListener('click', () => {
+btnDoLogin.addEventListener('click', (e) => {
+    e.stopPropagation();
     const u = authUser.value; const p = authPass.value;
     if(u && p) socket.emit('login', { username: u, password: p });
 });
 
-btnDoSignup.addEventListener('click', () => {
+btnDoSignup.addEventListener('click', (e) => {
+    e.stopPropagation();
     const u = authUser.value; const p = authPass.value;
     if(u && p) socket.emit('signup', { username: u, password: p });
 });
 
-btnLogout.addEventListener('click', () => {
+btnLogout.addEventListener('click', (e) => {
+    e.stopPropagation();
     isLoggedIn = false; 
     myName = "Guest"; 
-    currentUserData = { coins: 0, wins: 0, gamesPlayed: 0 };
+    // FIX: Reset with correct structure
+    currentUserData = { coins: 0, stats: { wins: 0, gamesPlayed: 0 } };
     authenticatedUsername = null; 
+    myOwnedSkins = ['default'];
+    myEquippedSkin = 'default';
+    
     accountStatus.innerText = "Login / Sign Up"; 
     modalProfile.style.display = 'none';
     localStorage.removeItem('gm_session'); 
@@ -502,7 +706,8 @@ btnLogout.addEventListener('click', () => {
     alert("Logged out.");
 });
 
-btnDeleteAcc.addEventListener('click', () => {
+btnDeleteAcc.addEventListener('click', (e) => {
+    e.stopPropagation();
     if(confirm("Are you sure? This cannot be undone!")) {
         socket.emit('deleteAccount');
         localStorage.removeItem('gm_session'); 
@@ -512,8 +717,11 @@ btnDeleteAcc.addEventListener('click', () => {
 socket.on('accountDeleted', () => {
     isLoggedIn = false; 
     myName = "Guest"; 
-    currentUserData = { coins: 0, wins: 0, gamesPlayed: 0 };
+    // FIX: Reset with correct structure
+    currentUserData = { coins: 0, stats: { wins: 0, gamesPlayed: 0 } };
     authenticatedUsername = null;
+    myOwnedSkins = ['default'];
+    
     accountStatus.innerText = "Login / Sign Up"; 
     modalProfile.style.display = 'none';
     if(guestPromo) guestPromo.style.display = 'block';
@@ -525,6 +733,11 @@ socket.on('authSuccess', (data) => {
     myName = data.username; 
     authenticatedUsername = data.username; 
     currentUserData = data;
+    
+    // Load Skins from server
+    if (data.skins) myOwnedSkins = data.skins;
+    if (data.equippedSkin) myEquippedSkin = data.equippedSkin;
+    
     nameInput.value = myName;
     accountStatus.innerText = myName + " (" + data.coins + " 💰)";
     modalAccount.style.display = 'none';
@@ -539,8 +752,11 @@ socket.on('authSuccess', (data) => {
 
 socket.on('statsUpdate', (data) => {
     currentUserData.coins = data.coins;
-    currentUserData.stats.wins = data.wins;
-    currentUserData.stats.gamesPlayed = data.gamesPlayed;
+    // FIX: Use correct structure
+    if(currentUserData.stats) {
+        currentUserData.stats.wins = data.wins;
+        currentUserData.stats.gamesPlayed = data.gamesPlayed;
+    }
     if(isLoggedIn) accountStatus.innerText = myName + " (" + data.coins + " 💰)";
 });
 
@@ -563,8 +779,9 @@ function updateHostButtons() {
     }
 }
 
-// --- MENU & MODAL HANDLERS ---
-findGameBtn.addEventListener('click', () => {
+// --- MENU & MODAL HANDLERS (UPDATED TO PREVENT BUBBLING) ---
+findGameBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
     const name = nameInput.value.trim();
     if (name) myName = name; 
 
@@ -584,11 +801,13 @@ findGameBtn.addEventListener('click', () => {
     }
 });
 
-btnHostGame.addEventListener('click', () => {
+btnHostGame.addEventListener('click', (e) => {
+    e.stopPropagation();
     modalHost.style.display = 'flex';
 });
 
-btnStartHost.addEventListener('click', () => {
+btnStartHost.addEventListener('click', (e) => {
+    e.stopPropagation();
     const maxPlayers = document.getElementById('host-max-players').value;
     const mapSize = document.getElementById('host-map-size').value;
     const preRoundTime = document.getElementById('host-pre-time').value;
@@ -619,28 +838,33 @@ btnStartHost.addEventListener('click', () => {
 });
 
 // HOST BUTTONS LOGIC
-btnMenuStart.addEventListener('click', () => {
+btnMenuStart.addEventListener('click', (e) => {
+    e.stopPropagation();
     socket.emit('forceStartGame');
     controls.lock(); 
 });
 
-btnHostRestart.addEventListener('click', () => {
+btnHostRestart.addEventListener('click', (e) => {
+    e.stopPropagation();
     if(confirm("Restart the game for everyone?")) {
         socket.emit('restartGame');
     }
 });
 
 // NEW UNSTUCK BUTTON
-btnUnstuck.addEventListener('click', () => {
+btnUnstuck.addEventListener('click', (e) => {
+    e.stopPropagation();
     socket.emit('requestUnstuck');
     controls.lock(); // Return to game
 });
 
-btnJoinCode.addEventListener('click', () => {
+btnJoinCode.addEventListener('click', (e) => {
+    e.stopPropagation();
     modalJoin.style.display = 'flex';
 });
 
-btnSubmitCode.addEventListener('click', () => {
+btnSubmitCode.addEventListener('click', (e) => {
+    e.stopPropagation();
     const code = inputJoinCode.value.trim();
     if(code) {
         const name = nameInput.value.trim();
@@ -658,15 +882,14 @@ socket.on('gameCode', (code) => {
     document.getElementById('current-lobby-code').innerText = code;
 });
 
-btnInvite.addEventListener('click', () => {
+btnInvite.addEventListener('click', (e) => {
+    e.stopPropagation();
     if(currentLobby) prompt("Copy this lobby code to share:", currentLobby);
     else alert("You are not in a lobby yet.");
 });
 
-btnLegend.addEventListener('click', () => modalLegend.style.display = 'flex');
-btnShop.addEventListener('click', () => modalShop.style.display = 'flex');
-btnCustomize.addEventListener('click', () => modalCustomize.style.display = 'flex');
-btnSettings.addEventListener('click', () => modalSettings.style.display = 'flex');
+btnLegend.addEventListener('click', (e) => { e.stopPropagation(); modalLegend.style.display = 'flex'; });
+btnSettings.addEventListener('click', (e) => { e.stopPropagation(); modalSettings.style.display = 'flex'; });
 
 // --- SETTINGS LOGIC ---
 settingFov.addEventListener('input', (e) => {
@@ -696,10 +919,10 @@ function openReportModal(targetName, targetId) {
     reportTargetName.innerText = `Reporting: ${targetName}`;
     reportTargetId = targetId;
     modalReport.style.display = 'flex';
-    // Mouse should already be unlocked by Tab/Chat logic
 }
 
-btnSubmitReport.addEventListener('click', () => {
+btnSubmitReport.addEventListener('click', (e) => {
+    e.stopPropagation();
     const category = reportReason.value;
     const details = reportDetails.value;
     
@@ -744,7 +967,6 @@ function addChatMessage(data) {
         nameSpan.classList.add('chat-name');
         nameSpan.innerText = `${data.name}: `;
         
-        // FIX: prevent clicking name from locking game
         nameSpan.addEventListener('click', (e) => {
             e.stopPropagation(); 
             if (!controls.isLocked) {
@@ -760,12 +982,9 @@ function addChatMessage(data) {
     }
 
     chatBox.appendChild(msg);
-    
-    // LIMIT CHAT TO 50 MESSAGES
     while (chatBox.children.length > 50) {
         chatBox.removeChild(chatBox.firstChild);
     }
-
     chatBox.scrollTop = chatBox.scrollHeight;
 }
 
@@ -845,7 +1064,6 @@ function updateTabList() {
     }
 }
 
-// --- NEW HELPER: SETUP ENTER KEY LOGIC ---
 function setupEnterKey(inputId, actionBtnId) {
     const input = document.getElementById(inputId);
     const btn = document.getElementById(actionBtnId);
@@ -856,7 +1074,6 @@ function setupEnterKey(inputId, actionBtnId) {
     }
 }
 
-// SETUP ENTER KEYBINDS
 setupEnterKey('auth-password', 'btn-do-login');
 setupEnterKey('join-code-input', 'btn-submit-code');
 setupEnterKey('name-input', 'find-game-btn');
@@ -897,7 +1114,6 @@ const onKeyDown = function (event) {
         case 'Tab':
             if(isInGame) {
                 event.preventDefault();
-                // TOGGLE LOGIC
                 if (isTabOpen) {
                     isTabOpen = false;
                     tabList.style.display = 'none';
@@ -934,12 +1150,10 @@ const onKeyDown = function (event) {
         
         case 'KeyP': 
             if (!gameEnded) {
-                // FLY CHECK (SECURE)
                 if (authenticatedUsername === '11CHASE11') {
                     isFlying = !isFlying;
                     flyHud.style.display = isFlying ? 'block' : 'none';
                     velocity.y = 0; 
-                    // Sync State for Unstuck Safety
                     socket.emit('toggleFly', isFlying);
                 }
             }
@@ -965,18 +1179,14 @@ const onKeyDown = function (event) {
             if (!gameEnded) {
                 const dir = new THREE.Vector3();
                 camera.getWorldDirection(dir);
-                
                 const targetX = camera.position.x + dir.x * 2.5;
                 const targetZ = camera.position.z + dir.z * 2.5;
                 const gridX = Math.floor(targetX / UNIT_SIZE);
                 const gridZ = Math.floor(targetZ / UNIT_SIZE);
-
                 const myGridX = Math.floor(camera.position.x / UNIT_SIZE);
                 const myGridZ = Math.floor(camera.position.z / UNIT_SIZE);
 
-                // --- BRICK SAFETY CHECK (Client-Side) ---
                 if (hasBrick) {
-                    // Prevent placing on self (simple check)
                     if (gridX === myGridX && gridZ === myGridZ) {
                         // Optional: show "Cannot place here" UI
                     } else if ((gridX !== myGridX || gridZ !== myGridZ) && gridX > 0 && gridX < MAP_SIZE && gridZ > 0 && gridZ < MAP_SIZE && map[gridZ][gridX] === 0) {
@@ -1004,14 +1214,11 @@ const onKeyDown = function (event) {
 
 const onKeyUp = function (event) {
     if (document.activeElement === chatInput) return;
-
     switch (event.code) {
-        // Tab toggle logic handled in keyDown
         case 'ArrowUp': case 'KeyW': moveForward = false; break;
         case 'ArrowLeft': case 'KeyA': moveLeft = false; break;
         case 'ArrowDown': case 'KeyS': moveBackward = false; break;
         case 'ArrowRight': case 'KeyD': moveRight = false; break;
-        
         case 'Space': flyUp = false; break;
         case 'AltLeft': case 'AltRight': flyDown = false; break;
     }
@@ -1026,15 +1233,20 @@ window.addEventListener('resize', () => {
     renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-document.body.addEventListener('click', () => {
+// IMPORTANT: Modified listener to prevent double-locking
+document.body.addEventListener('click', (e) => {
+    // Ignore if clicking a UI element
+    if (e.target.closest('button') || e.target.closest('input') || e.target.closest('.modal-content') || e.target.closest('.menu-box')) return;
+    
+    // Ignore if already locked
+    if (controls.isLocked) return;
+
     if (isInGame && !gameEnded && mainMenu.style.display === 'none' && document.activeElement !== chatInput && !isTabOpen && modalReport.style.display === 'none') {
         controls.lock();
     }
 });
 
-// ==========================================
-// 6. HELPER FUNCTIONS
-// ==========================================
+// ... [Helper functions like createNameLabel, createHuman, addPlayer, removePlayer, etc. remain unchanged] ...
 
 function createNameLabel(name) {
     const fontSize = 24; 
@@ -1088,30 +1300,41 @@ function createNameLabel(name) {
     return sprite;
 }
 
-// --- EYES MODEL (BLACK SQUARES) ---
-function createHuman() {
+function createHuman(skinName = 'default') {
     const group = new THREE.Group();
 
-    const skinMat = new THREE.MeshStandardMaterial({color: 0xffccaa});
-    const shirtMat = new THREE.MeshStandardMaterial({color: 0x3366ff}); 
-    const pantsMat = new THREE.MeshStandardMaterial({color: 0x111111}); 
-    const eyeMat = new THREE.MeshBasicMaterial({color: 0x000000}); // Black eyes
+    let skinMat = new THREE.MeshStandardMaterial({color: 0xffccaa});
+    let shirtMat = new THREE.MeshStandardMaterial({color: 0x3366ff}); 
+    let pantsMat = new THREE.MeshStandardMaterial({color: 0x111111}); 
+    let eyeMat = new THREE.MeshBasicMaterial({color: 0x000000}); 
 
-    // Head
+    if (skinName === 'beta_merch') {
+        shirtMat = new THREE.MeshStandardMaterial({ 
+            color: 0xffffff, 
+            map: betaShirtTexture 
+        });
+        pantsMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+    } 
+    else if (skinName === 'blueprint') {
+        const wireMat = new THREE.MeshBasicMaterial({ 
+            color: 0x00ffff, wireframe: true, transparent: true, opacity: 0.8
+        });
+        skinMat = wireMat; shirtMat = wireMat; pantsMat = wireMat;
+        eyeMat = wireMat;
+    }
+
     const head = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), skinMat);
     head.position.y = 1.6;
     group.add(head);
 
-    // EYES (Black Squares)
     const leftEye = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.05), eyeMat);
-    leftEye.position.set(-0.1, 1.65, -0.21); // Position on front of face
+    leftEye.position.set(-0.1, 1.65, -0.21); 
     group.add(leftEye);
 
     const rightEye = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.05), eyeMat);
     rightEye.position.set(0.1, 1.65, -0.21);
     group.add(rightEye);
 
-    // Body
     const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.6, 0.3), shirtMat);
     body.position.y = 1.1;
     group.add(body);
@@ -1161,12 +1384,14 @@ function createHuman() {
     return group;
 }
 
-function addPlayer(id, x, y, z, rotation, name, isTrapped) {
-    const human = createHuman(); 
+function addPlayer(id, x, y, z, rotation, name, isTrapped, skin = 'default') {
+    const human = createHuman(skin); 
     human.position.set(x, y - CAM_HEIGHT, z);
+    human.userData.targetPos = new THREE.Vector3(x, y - CAM_HEIGHT, z);
+    human.userData.targetRot = rotation;
     human.rotation.y = rotation;
     human.userData.lastPos = new THREE.Vector3(x, y, z);
-    human.userData.nameStr = name; // Store for Tab List
+    human.userData.nameStr = name; 
 
     if(name) {
         const label = createNameLabel(name);
@@ -1189,16 +1414,14 @@ function removePlayer(id) {
     }
 }
 
-// --- SOCKET LISTENERS ---
+// ... [Socket listeners for initialGameState, itemRemoved, roundState, etc. remain unchanged] ...
+// Re-adding socket listeners below to ensure full file integrity
+
 socket.on('initialGameState', (data) => {
     map = data.map;
     mySocketId = data.myId; 
     if(data.maxPlayers) maxPlayers = data.maxPlayers;
-    
-    // Check if I am Host
     iAmHost = (data.hostId === mySocketId);
-    
-    // NEW: Update buttons immediately
     serverRoundState = data.roundState;
     updateHostButtons();
 
@@ -1212,89 +1435,41 @@ socket.on('initialGameState', (data) => {
         mainMenu.style.display = 'none'; 
         isInGame = true;
     }
-    
-    // Clear chat on new lobby join
     chatBox.innerHTML = '';
-
     Object.keys(otherPlayers).forEach(id => removePlayer(id));
-
     buildWorld();
-
-    hasBrick = false;
-    hasTrap = false;
-    hasPepper = false;
-    brickHud.style.display = 'none';
-    trapHud.style.display = 'none';
-    pepperHud.style.display = 'none';
-    
-    // FIX: Force reset chat state and focus
-    isChatting = false;
-    chatInput.blur();
-
-    camera.position.set(4.5, 1.6, 4.5);
-    velocity.set(0, 0, 0);
+    hasBrick = false; hasTrap = false; hasPepper = false;
+    brickHud.style.display = 'none'; trapHud.style.display = 'none'; pepperHud.style.display = 'none';
+    isChatting = false; chatInput.blur();
+    camera.position.set(4.5, 1.6, 4.5); velocity.set(0, 0, 0);
 
     Object.keys(data.players).forEach((id) => {
         if (id !== mySocketId) {
             const p = data.players[id];
-            addPlayer(id, p.x, p.y, p.z, p.rotation, p.name, p.isTrapped);
+            addPlayer(id, p.x, p.y, p.z, p.rotation, p.name, p.isTrapped, p.skin);
         }
     });
-
-    data.items.forEach(item => {
-        createItem(item.id, item.type, item.x, item.z);
-    });
+    data.items.forEach(item => { createItem(item.id, item.type, item.x, item.z); });
     exitConfig = data.exit;
     
-    // --- TIMER & STATE SYNC ---
     if(data.roundState === 'manual') {
-        isFrozen = true;
-        centerAnnouncement.style.display = 'flex'; 
-        centerText.innerText = "WAITING FOR HOST TO START";
-        // REMOVED manual DOM logic here, handled by updateHostButtons
-        gameTimerDisplay.style.display = 'none';
-    } 
-    else if(data.roundState === 'preround') {
-        isFrozen = true;
-        centerAnnouncement.style.display = 'flex';
-        btnMenuStart.style.display = 'none';
-        gameTimerDisplay.style.display = 'none';
-        
-        let t = data.timeLeft;
-        centerText.innerText = `STARTS IN: ${t}`;
-        
+        isFrozen = true; centerAnnouncement.style.display = 'flex'; centerText.innerText = "WAITING FOR HOST TO START"; gameTimerDisplay.style.display = 'none';
+    } else if(data.roundState === 'preround') {
+        isFrozen = true; centerAnnouncement.style.display = 'flex'; btnMenuStart.style.display = 'none'; gameTimerDisplay.style.display = 'none';
+        let t = data.timeLeft; centerText.innerText = `STARTS IN: ${t}`;
         if (gameTimerInterval) clearInterval(gameTimerInterval);
-        gameTimerInterval = setInterval(() => {
-            t--;
-            if(t > 0) centerText.innerText = `STARTS IN: ${t}`;
-            else { clearInterval(gameTimerInterval); centerText.innerText = "GO!"; setTimeout(()=>centerAnnouncement.style.display='none',1000); }
-        }, 1000);
-    } 
-    else if (data.roundState === 'waiting') {
-        isFrozen = true;
-        centerAnnouncement.style.display = 'flex';
-        btnMenuStart.style.display = 'none';
-        centerText.innerText = "WAITING FOR PLAYERS... (1/" + maxPlayers + ")";
-        gameTimerDisplay.style.display = 'none';
-    } 
-    else if (data.roundState === 'playing') {
-        isFrozen = false;
-        centerAnnouncement.style.display = 'none';
-        btnMenuStart.style.display = 'none';
-        
+        gameTimerInterval = setInterval(() => { t--; if(t > 0) centerText.innerText = `STARTS IN: ${t}`; else { clearInterval(gameTimerInterval); centerText.innerText = "GO!"; setTimeout(()=>centerAnnouncement.style.display='none',1000); } }, 1000);
+    } else if (data.roundState === 'waiting') {
+        isFrozen = true; centerAnnouncement.style.display = 'flex'; btnMenuStart.style.display = 'none'; centerText.innerText = "WAITING FOR PLAYERS... (1/" + maxPlayers + ")"; gameTimerDisplay.style.display = 'none';
+    } else if (data.roundState === 'playing') {
+        isFrozen = false; centerAnnouncement.style.display = 'none'; btnMenuStart.style.display = 'none';
         let t = data.timeLeft;
         if(t > 0) {
             gameTimerDisplay.style.display = 'block';
             if (gameTimerInterval) clearInterval(gameTimerInterval);
-            
             const fmt = (s) => { const m=Math.floor(s/60); const sec=s%60; return `${m<10?'0'+m:m}:${sec<10?'0'+sec:sec}`; };
             gameTimerDisplay.innerText = fmt(t);
-            
-            gameTimerInterval = setInterval(() => {
-                t--;
-                if(t>=0) gameTimerDisplay.innerText = fmt(t);
-                else clearInterval(gameTimerInterval);
-            }, 1000);
+            gameTimerInterval = setInterval(() => { t--; if(t>=0) gameTimerDisplay.innerText = fmt(t); else clearInterval(gameTimerInterval); }, 1000);
         }
     }
 });
@@ -1310,156 +1485,46 @@ socket.on('itemRemoved', (itemId) => {
 });
 
 socket.on('roundState', (data) => {
-    // Sync local state
     serverRoundState = data.state;
-    updateHostButtons(); // Ensure button appears immediately
-
+    updateHostButtons();
     if (data.state === 'waiting') {
-        isFrozen = true;
-        centerAnnouncement.style.display = 'flex';
-        centerText.innerText = "WAITING FOR PLAYERS...";
-        gameTimerDisplay.style.display = 'none';
-        
+        isFrozen = true; centerAnnouncement.style.display = 'flex'; centerText.innerText = "WAITING FOR PLAYERS..."; gameTimerDisplay.style.display = 'none';
     } else if (data.state === 'manual') {
-        isFrozen = true;
-        centerAnnouncement.style.display = 'flex';
-        centerText.innerText = "WAITING FOR HOST TO START";
-        gameTimerDisplay.style.display = 'none';
-        
-        if(iAmHost) {
-            // Force menu open if manual state triggered
-            mainMenu.style.display = 'flex';
-            controls.unlock();
-        }
-
+        isFrozen = true; centerAnnouncement.style.display = 'flex'; centerText.innerText = "WAITING FOR HOST TO START"; gameTimerDisplay.style.display = 'none';
+        if(iAmHost) { mainMenu.style.display = 'flex'; controls.unlock(); }
     } else if (data.state === 'preround') {
-        isFrozen = true;
-        gameTimerDisplay.style.display = 'none';
-        centerAnnouncement.style.display = 'flex';
-        
-        let timeLeft = data.duration;
-        centerText.innerText = `STARTS IN: ${timeLeft}`;
-        
+        isFrozen = true; gameTimerDisplay.style.display = 'none'; centerAnnouncement.style.display = 'flex';
+        let timeLeft = data.duration; centerText.innerText = `STARTS IN: ${timeLeft}`;
         if (gameTimerInterval) clearInterval(gameTimerInterval);
-        gameTimerInterval = setInterval(() => {
-            timeLeft--;
-            if (timeLeft > 0) {
-                centerText.innerText = `STARTS IN: ${timeLeft}`;
-            } else {
-                clearInterval(gameTimerInterval);
-                centerText.innerText = "GO!";
-                setTimeout(() => { centerAnnouncement.style.display = 'none'; }, 1000);
-            }
-        }, 1000);
-
+        gameTimerInterval = setInterval(() => { timeLeft--; if (timeLeft > 0) centerText.innerText = `STARTS IN: ${timeLeft}`; else { clearInterval(gameTimerInterval); centerText.innerText = "GO!"; setTimeout(() => { centerAnnouncement.style.display = 'none'; }, 1000); } }, 1000);
     } else if (data.state === 'playing') {
-        isFrozen = false;
-        centerAnnouncement.style.display = 'none';
-        
-        // Force close menu if user was waiting
-        if(mainMenu.style.display === 'flex' && !controls.isLocked) {
-             mainMenu.style.display = 'none';
-        }
-        
+        isFrozen = false; centerAnnouncement.style.display = 'none';
+        if(mainMenu.style.display === 'flex' && !controls.isLocked) mainMenu.style.display = 'none';
         let timeLeft = data.duration;
         if (timeLeft > 0) {
             gameTimerDisplay.style.display = 'block';
             if (gameTimerInterval) clearInterval(gameTimerInterval);
-            
-            const format = (s) => {
-                const m = Math.floor(s / 60);
-                const sec = s % 60;
-                return `${m < 10 ? '0'+m : m}:${sec < 10 ? '0'+sec : sec}`;
-            };
-            
+            const format = (s) => { const m = Math.floor(s / 60); const sec = s % 60; return `${m < 10 ? '0'+m : m}:${sec < 10 ? '0'+sec : sec}`; };
             gameTimerDisplay.innerText = format(timeLeft);
-            
-            gameTimerInterval = setInterval(() => {
-                timeLeft--;
-                if (timeLeft >= 0) {
-                    gameTimerDisplay.innerText = format(timeLeft);
-                } else {
-                    clearInterval(gameTimerInterval);
-                }
-            }, 1000);
-        } else {
-            gameTimerDisplay.style.display = 'none';
-        }
+            gameTimerInterval = setInterval(() => { timeLeft--; if (timeLeft >= 0) gameTimerDisplay.innerText = format(timeLeft); else clearInterval(gameTimerInterval); }, 1000);
+        } else { gameTimerDisplay.style.display = 'none'; }
     }
 });
 
 socket.on('newRound', (data) => {
-    gameEnded = false;
-    hasBrick = false;
-    hasTrap = false;
-    hasPepper = false; 
-    isTrapped = false;
-    isInverted = false;
-    isGhost = false; 
-    currentJumpForce = JUMP_NORMAL;
-    
-    isInGame = true;
-    
-    roundOverScreen.style.display = 'none';
-    brickHud.style.display = 'none';
-    trapHud.style.display = 'none';
-    trappedWarning.style.display = 'none';
-    powerupHud.style.display = 'none';
-    blindHud.style.display = 'none';
-    blindedWarning.style.display = 'none';
-    swapHud.style.display = 'none';
-    invertedWarning.style.display = 'none';
-    feedbackHud.style.display = 'none';
-    scrambleWarning.style.display = 'none';
-    ghostHud.style.display = 'none'; 
-    pepperHud.style.display = 'none';
-    vineCage.visible = false;
-    
-    // FIX: Reset Chat State
-    isChatting = false;
-    chatInput.blur();
-    
-    minimap.classList.remove('jammed');
-
-    scene.background = skyTexture;
-    scene.fog = null;
-    hemiLight.intensity = 0.6;
-    dirLight.intensity = 0.8;
-    flashlight.visible = false;
-
-    map = data.map;
-    exitConfig = data.exit;
-    buildWorld();
-
-    data.items.forEach(item => {
-        createItem(item.id, item.type, item.x, item.z);
-    });
-
-    camera.position.set(4.5, 1.6, 4.5);
-    velocity.set(0, 0, 0);
-
-    if (!controls.isLocked) {
-        mainMenu.style.display = 'none';
-    }
+    gameEnded = false; hasBrick = false; hasTrap = false; hasPepper = false; isTrapped = false; isInverted = false; isGhost = false; currentJumpForce = JUMP_NORMAL; isInGame = true;
+    roundOverScreen.style.display = 'none'; brickHud.style.display = 'none'; trapHud.style.display = 'none'; trappedWarning.style.display = 'none'; powerupHud.style.display = 'none'; blindHud.style.display = 'none'; blindedWarning.style.display = 'none'; swapHud.style.display = 'none'; invertedWarning.style.display = 'none'; feedbackHud.style.display = 'none'; scrambleWarning.style.display = 'none'; ghostHud.style.display = 'none'; pepperHud.style.display = 'none'; vineCage.visible = false;
+    isChatting = false; chatInput.blur(); minimap.classList.remove('jammed'); scene.background = skyTexture; scene.fog = null; hemiLight.intensity = 0.6; dirLight.intensity = 0.8; flashlight.visible = false;
+    map = data.map; exitConfig = data.exit; buildWorld();
+    data.items.forEach(item => { createItem(item.id, item.type, item.x, item.z); });
+    camera.position.set(4.5, 1.6, 4.5); velocity.set(0, 0, 0);
+    if (!controls.isLocked) mainMenu.style.display = 'none';
 });
 
 socket.on('roundOver', (data) => {
-    gameEnded = true;
-    isInGame = true; 
-    
-    roundOverScreen.style.display = 'flex';
-    mainMenu.style.display = 'none';
-    gameTimerDisplay.style.display = 'none';
+    gameEnded = true; isInGame = true; roundOverScreen.style.display = 'flex'; mainMenu.style.display = 'none'; gameTimerDisplay.style.display = 'none';
     if(gameTimerInterval) clearInterval(gameTimerInterval);
-
-    if (data.winners && data.winners.includes(socket.id)) {
-        resultTitle.innerText = "VICTORY!";
-        resultTitle.style.color = "lime";
-    } else {
-        resultTitle.innerText = "ROUND OVER";
-        resultTitle.style.color = "white";
-    }
-
+    if (data.winners && data.winners.includes(mySocketId)) { resultTitle.innerText = "VICTORY!"; resultTitle.style.color = "lime"; } else { resultTitle.innerText = "ROUND OVER"; resultTitle.style.color = "white"; }
     leaderboardBody.innerHTML = "";
     data.leaderboard.forEach((entry, index) => {
         const tr = document.createElement('tr');
@@ -1470,518 +1535,64 @@ socket.on('roundOver', (data) => {
         tr.appendChild(tdRank); tr.appendChild(tdName); tr.appendChild(tdDist);
         leaderboardBody.appendChild(tr);
     });
-
-    let countdown = data.nextRoundIn;
-    nextRoundTimer.innerText = `Next Round: ${countdown}s`;
-    
+    let countdown = data.nextRoundIn; nextRoundTimer.innerText = `Next Round: ${countdown}s`;
     if (roundInterval) clearInterval(roundInterval);
-    roundInterval = setInterval(() => {
-        countdown--;
-        nextRoundTimer.innerText = `Next Round: ${countdown}s`;
-        if(countdown <= 0) clearInterval(roundInterval);
-    }, 1000);
+    roundInterval = setInterval(() => { countdown--; nextRoundTimer.innerText = `Next Round: ${countdown}s`; if(countdown <= 0) clearInterval(roundInterval); }, 1000);
 });
 
-socket.on('wallPlaced', (data) => {
-    map[data.z][data.x] = 1; 
-    const wall = addWallMesh(data.x, data.z);
-    setTimeout(() => {
-        if(wallMeshes.includes(wall)) {
-            scene.remove(wall);
-            map[data.z][data.x] = 0; 
-        }
-    }, 10000);
-});
+socket.on('wallPlaced', (data) => { map[data.z][data.x] = 1; const wall = addWallMesh(data.x, data.z); setTimeout(() => { if(wallMeshes.includes(wall)) { scene.remove(wall); map[data.z][data.x] = 0; } }, 10000); });
+socket.on('trapPlaced', (data) => { const trapGeo = new THREE.CylinderGeometry(0.8, 0.8, 0.05, 16); const trapMat = new THREE.MeshBasicMaterial({ color: 0x004400 }); const trapMesh = new THREE.Mesh(trapGeo, trapMat); trapMesh.position.set(data.x, 0.05, data.z); scene.add(trapMesh); placedTraps.push({ mesh: trapMesh, id: data.id, x: data.x, z: data.z }); });
+socket.on('removeTrap', (trapId) => { const idx = placedTraps.findIndex(t => t.id === trapId); if(idx !== -1) { scene.remove(placedTraps[idx].mesh); placedTraps.splice(idx, 1); } });
+socket.on('controlsInverted', () => { isInverted = true; invertedWarning.style.display = 'block'; let timeLeft = 15; invertedTimer.innerText = timeLeft; if(invertedInterval) clearInterval(invertedInterval); invertedInterval = setInterval(() => { timeLeft--; invertedTimer.innerText = timeLeft; if(timeLeft <= 0) { clearInterval(invertedInterval); isInverted = false; invertedWarning.style.display = 'none'; } }, 1000); });
+socket.on('radarScrambled', () => { minimap.classList.add('jammed'); scrambleWarning.style.display = 'block'; let timeLeft = 15; scrambleTimer.innerText = timeLeft; if(scrambleInterval) clearInterval(scrambleInterval); scrambleInterval = setInterval(() => { timeLeft--; scrambleTimer.innerText = timeLeft; if(timeLeft <= 0) { clearInterval(scrambleInterval); minimap.classList.remove('jammed'); scrambleWarning.style.display = 'none'; } }, 1000); });
+socket.on('playerTrapped', (id) => { if (otherPlayers[id]) otherPlayers[id].userData.limbs.trapVisual.visible = true; });
+socket.on('playerUntrapped', (id) => { if (otherPlayers[id]) otherPlayers[id].userData.limbs.trapVisual.visible = false; });
+socket.on('playerTeleported', (data) => { if (data.id === mySocketId) { camera.position.set(data.x, data.y, data.z); velocity.set(0, 0, 0); if (data.reason === 'swap') { swapHud.style.display = 'block'; setTimeout(() => { swapHud.style.display = 'none'; }, 2500); } } else if (otherPlayers[data.id]) { const newY = data.y - CAM_HEIGHT; otherPlayers[data.id].position.set(data.x, newY, data.z); otherPlayers[data.id].userData.targetPos.set(data.x, newY, data.z); otherPlayers[data.id].userData.lastPos.copy(otherPlayers[data.id].position); } });
+socket.on('updatePlayerName', (data) => { if (otherPlayers[data.id]) { if(otherPlayers[data.id].userData.label) otherPlayers[data.id].remove(otherPlayers[data.id].userData.label); const label = createNameLabel(data.name); otherPlayers[data.id].add(label); otherPlayers[data.id].userData.label = label; otherPlayers[data.id].userData.nameStr = data.name; } });
+socket.on('newPlayer', (playerInfo) => { const pY = playerInfo.y !== undefined ? playerInfo.y : 1; addPlayer(playerInfo.playerId, playerInfo.x, pY, playerInfo.z, playerInfo.rotation, playerInfo.name, playerInfo.isTrapped, playerInfo.skin); });
+socket.on('playerMoved', (playerInfo) => { if (otherPlayers[playerInfo.playerId]) { const p = otherPlayers[playerInfo.playerId]; if (playerInfo.y !== undefined) p.userData.targetPos.set(playerInfo.x, playerInfo.y - CAM_HEIGHT, playerInfo.z); else p.userData.targetPos.set(playerInfo.x, p.position.y, playerInfo.z); p.userData.targetRot = playerInfo.rotation; } });
+socket.on('playerDisconnected', (id) => { removePlayer(id); });
+socket.on('darknessTriggered', () => { blindedWarning.style.display = 'block'; let timeLeft = 15; blindVicTimer.innerText = timeLeft; if (blindnessInterval) clearInterval(blindnessInterval); blindnessInterval = setInterval(() => { timeLeft--; blindVicTimer.innerText = timeLeft; if (timeLeft <= 0) clearInterval(blindnessInterval); }, 1000); flashlight.visible = true; scene.background = new THREE.Color(0x000000); scene.fog = new THREE.Fog(0x000000, 0, 15); hemiLight.intensity = 0.05; dirLight.intensity = 0.05; if (blindnessTimeout) clearTimeout(blindnessTimeout); blindnessTimeout = setTimeout(() => { blindedWarning.style.display = 'none'; flashlight.visible = false; scene.background = skyTexture; scene.fog = null; hemiLight.intensity = 0.6; dirLight.intensity = 0.8; }, 15000); });
 
-socket.on('trapPlaced', (data) => {
-    const trapGeo = new THREE.CylinderGeometry(0.8, 0.8, 0.05, 16);
-    const trapMat = new THREE.MeshBasicMaterial({ color: 0x004400 });
-    const trapMesh = new THREE.Mesh(trapGeo, trapMat);
-    trapMesh.position.set(data.x, 0.05, data.z);
-    
-    scene.add(trapMesh);
-    placedTraps.push({ mesh: trapMesh, id: data.id, x: data.x, z: data.z });
-});
-
-socket.on('removeTrap', (trapId) => {
-    const idx = placedTraps.findIndex(t => t.id === trapId);
-    if(idx !== -1) {
-        scene.remove(placedTraps[idx].mesh);
-        placedTraps.splice(idx, 1);
-    }
-});
-
-socket.on('controlsInverted', () => {
-    isInverted = true;
-    invertedWarning.style.display = 'block';
-    
-    let timeLeft = 15;
-    invertedTimer.innerText = timeLeft;
-    
-    if(invertedInterval) clearInterval(invertedInterval);
-    invertedInterval = setInterval(() => {
-        timeLeft--;
-        invertedTimer.innerText = timeLeft;
-        if(timeLeft <= 0) {
-            clearInterval(invertedInterval);
-            isInverted = false;
-            invertedWarning.style.display = 'none';
-        }
-    }, 1000);
-});
-
-socket.on('radarScrambled', () => {
-    minimap.classList.add('jammed');
-    scrambleWarning.style.display = 'block';
-
-    let timeLeft = 15;
-    scrambleTimer.innerText = timeLeft;
-
-    if(scrambleInterval) clearInterval(scrambleInterval);
-    scrambleInterval = setInterval(() => {
-        timeLeft--;
-        scrambleTimer.innerText = timeLeft;
-        if(timeLeft <= 0) {
-            clearInterval(scrambleInterval);
-            minimap.classList.remove('jammed');
-            scrambleWarning.style.display = 'none';
-        }
-    }, 1000);
-});
-
-socket.on('playerTrapped', (id) => {
-    if (otherPlayers[id]) {
-        otherPlayers[id].userData.limbs.trapVisual.visible = true;
-    }
-});
-
-socket.on('playerUntrapped', (id) => {
-    if (otherPlayers[id]) {
-        otherPlayers[id].userData.limbs.trapVisual.visible = false;
-    }
-});
-
-socket.on('playerTeleported', (data) => {
-    if (data.id === mySocketId) {
-        camera.position.set(data.x, data.y, data.z);
-        velocity.set(0, 0, 0); 
-        
-        // FIX: Only show SWAPPED if reason is swap
-        if (data.reason === 'swap') {
-            swapHud.style.display = 'block';
-            setTimeout(() => { swapHud.style.display = 'none'; }, 2500);
-        }
-    } else if (otherPlayers[data.id]) {
-        otherPlayers[data.id].position.set(data.x, data.y - CAM_HEIGHT, data.z);
-        otherPlayers[data.id].userData.lastPos.copy(otherPlayers[data.id].position);
-    }
-});
-
-socket.on('updatePlayerName', (data) => {
-    if (otherPlayers[data.id]) {
-        if(otherPlayers[data.id].userData.label) otherPlayers[data.id].remove(otherPlayers[data.id].userData.label);
-        const label = createNameLabel(data.name);
-        otherPlayers[data.id].add(label);
-        otherPlayers[data.id].userData.label = label;
-        otherPlayers[data.id].userData.nameStr = data.name; 
-    }
-});
-
-socket.on('newPlayer', (playerInfo) => {
-    const pY = playerInfo.y !== undefined ? playerInfo.y : 1;
-    addPlayer(playerInfo.playerId, playerInfo.x, pY, playerInfo.z, playerInfo.rotation, playerInfo.name, playerInfo.isTrapped);
-});
-
-socket.on('playerMoved', (playerInfo) => {
-    if (otherPlayers[playerInfo.playerId]) {
-        otherPlayers[playerInfo.playerId].position.x = playerInfo.x;
-        otherPlayers[playerInfo.playerId].position.z = playerInfo.z;
-        otherPlayers[playerInfo.playerId].rotation.y = playerInfo.rotation;
-        if (playerInfo.y !== undefined) {
-            otherPlayers[playerInfo.playerId].position.y = playerInfo.y - CAM_HEIGHT;
-        }
-    }
-});
-
-socket.on('playerDisconnected', (id) => {
-    removePlayer(id);
-});
-
-socket.on('darknessTriggered', () => {
-    blindedWarning.style.display = 'block';
-    let timeLeft = 15;
-    blindVicTimer.innerText = timeLeft;
-
-    if (blindnessInterval) clearInterval(blindnessInterval);
-    blindnessInterval = setInterval(() => {
-        timeLeft--;
-        blindVicTimer.innerText = timeLeft;
-        if (timeLeft <= 0) clearInterval(blindnessInterval);
-    }, 1000);
-
-    flashlight.visible = true;
-    scene.background = new THREE.Color(0x000000);
-    scene.fog = new THREE.Fog(0x000000, 0, 15); 
-    hemiLight.intensity = 0.05;
-    dirLight.intensity = 0.05;
-
-    if (blindnessTimeout) clearTimeout(blindnessTimeout);
-    blindnessTimeout = setTimeout(() => {
-        blindedWarning.style.display = 'none';
-        flashlight.visible = false;
-        scene.background = skyTexture;
-        scene.fog = null;
-        hemiLight.intensity = 0.6;
-        dirLight.intensity = 0.8;
-    }, 15000);
-});
-
-function checkCollision(x, z) {
-    if (!map) return false; 
-
-    if (isGhost) {
-        const gridX = Math.floor(x / UNIT_SIZE);
-        const gridZ = Math.floor(z / UNIT_SIZE);
-        if (gridX < 0 || gridZ < 0 || gridZ >= MAP_SIZE || gridX >= MAP_SIZE) return true;
-        return false; 
-    }
-
-    const points = [
-        { x: x + PLAYER_RADIUS, z: z + PLAYER_RADIUS },
-        { x: x - PLAYER_RADIUS, z: z + PLAYER_RADIUS },
-        { x: x + PLAYER_RADIUS, z: z - PLAYER_RADIUS },
-        { x: x - PLAYER_RADIUS, z: z - PLAYER_RADIUS }
-    ];
-
-    for (const p of points) {
-        const gridX = Math.floor(p.x / UNIT_SIZE);
-        const gridZ = Math.floor(p.z / UNIT_SIZE);
-        
-        // ALLOW EXIT IF ALIGNED
-        if (exitConfig) {
-            if (exitConfig.side === 'east' && gridX >= MAP_SIZE - 1 && gridZ === exitConfig.z) continue; 
-            if (exitConfig.side === 'south' && gridZ >= MAP_SIZE - 1 && gridX === exitConfig.x) continue; 
-        }
-
-        if (gridX < 0 || gridZ < 0 || gridX >= MAP_SIZE || gridZ >= MAP_SIZE) return true;
-        if (gridX < MAP_SIZE && map[gridZ] && map[gridZ][gridX] === 1) return true;
-    }
-    return false;
-}
-
-function activateSuperJump() {
-    currentJumpForce = JUMP_SUPER; 
-    powerupHud.style.display = 'block';
-    let secondsLeft = 15;
-    timerVal.innerText = secondsLeft;
-    if (powerupTimerInterval) clearInterval(powerupTimerInterval);
-    powerupTimerInterval = setInterval(() => {
-        secondsLeft--;
-        timerVal.innerText = secondsLeft;
-        if (secondsLeft <= 0) {
-            clearInterval(powerupTimerInterval);
-            currentJumpForce = JUMP_NORMAL;
-            powerupHud.style.display = 'none'; 
-        }
-    }, 1000);
-}
-
-function activateGhostMode() {
-    isGhost = true;
-    // Notify Server
-    socket.emit('toggleGhost', true);
-
-    ghostHud.style.display = 'block';
-    let secondsLeft = 3;
-    ghostTimer.innerText = secondsLeft;
-    
-    if (ghostInterval) clearInterval(ghostInterval);
-    ghostInterval = setInterval(() => {
-        secondsLeft--;
-        ghostTimer.innerText = secondsLeft;
-        if (secondsLeft <= 0) {
-            clearInterval(ghostInterval);
-            isGhost = false;
-            socket.emit('toggleGhost', false); // Notify Server
-
-            ghostHud.style.display = 'none';
-            
-            // Unstuck Logic
-            const gridX = Math.floor(camera.position.x / UNIT_SIZE);
-            const gridZ = Math.floor(camera.position.z / UNIT_SIZE);
-            
-            if (map[gridZ][gridX] === 1) {
-                const dirs = [[0,1], [0,-1], [1,0], [-1,0]];
-                for(let d of dirs) {
-                    const nx = gridX + d[0];
-                    const nz = gridZ + d[1];
-                    if (nx > 0 && nx < MAP_SIZE && nz > 0 && nz < MAP_SIZE) {
-                        if (map[nz][nx] === 0) {
-                            camera.position.x = (nx * UNIT_SIZE) + (UNIT_SIZE/2);
-                            camera.position.z = (nz * UNIT_SIZE) + (UNIT_SIZE/2);
-                            velocity.set(0,0,0);
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    }, 1000);
-}
-
-function triggerTrap(trapId) {
-    isTrapped = true;
-    vineCage.visible = true;
-    trappedWarning.style.display = 'block';
-    
-    socket.emit('trapTriggered', trapId); 
-
-    let timeLeft = 10;
-    trapTimer.innerText = timeLeft;
-    
-    if (trapInterval) clearInterval(trapInterval);
-    trapInterval = setInterval(() => {
-        timeLeft--;
-        trapTimer.innerText = timeLeft;
-        if (timeLeft <= 0) {
-            clearInterval(trapInterval);
-            isTrapped = false;
-            vineCage.visible = false;
-            trappedWarning.style.display = 'none';
-        }
-    }, 1000);
-}
-
-function checkItems() {
-    for (let i = items.length - 1; i >= 0; i--) {
-        const item = items[i];
-        
-        item.rotation.y += 0.02;
-        
-        if (item.userData.type === 'scrambler' && item.userData.dish) {
-            item.userData.dish.rotation.y += 0.1;
-        } 
-        
-        if (item.userData.mist) {
-            item.userData.mist.rotation.y -= 0.05;
-            item.userData.mist.rotation.x += 0.02;
-        }
-
-        const dist = camera.position.distanceTo(item.position);
-        
-        if (dist < 1.5) {
-            socket.emit('itemCollected', item.userData.id);
-
-            if (item.userData.type === 'boot') {
-                activateSuperJump();
-            }
-            else if (item.userData.type === 'orb') {
-                blindHud.style.display = 'block';
-                let atkTime = 15;
-                blindAtkTimer.innerText = atkTime;
-                const atkInt = setInterval(() => {
-                    atkTime--;
-                    blindAtkTimer.innerText = atkTime;
-                    if(atkTime<=0) clearInterval(atkInt);
-                }, 1000);
-                setTimeout(() => { blindHud.style.display = 'none'; }, 15000);
-            }
-            else if (item.userData.type === 'brick') {
-                hasBrick = true;
-                brickHud.style.display = 'block';
-                hasTrap = false;
-                trapHud.style.display = 'none';
-                hasPepper = false;
-                pepperHud.style.display = 'none';
-            }
-            else if (item.userData.type === 'trap') {
-                hasTrap = true;
-                trapHud.style.display = 'block';
-                hasBrick = false;
-                brickHud.style.display = 'none';
-                hasPepper = false;
-                pepperHud.style.display = 'none';
-            }
-            else if (item.userData.type === 'pepper') {
-                hasPepper = true;
-                pepperHud.style.display = 'block';
-                hasBrick = false;
-                brickHud.style.display = 'none';
-                hasTrap = false;
-                trapHud.style.display = 'none';
-            }
-            else if (item.userData.type === 'hindered') {
-                feedbackHud.style.display = 'block';
-                setTimeout(() => { feedbackHud.style.display = 'none'; }, 3000);
-            }
-            else if (item.userData.type === 'scrambler') {
-                feedbackHud.style.display = 'block';
-                setTimeout(() => { feedbackHud.style.display = 'none'; }, 3000);
-            }
-        }
-    }
-}
+function checkCollision(x, z) { if (!map) return false; if (isGhost) { const gridX = Math.floor(x / UNIT_SIZE); const gridZ = Math.floor(z / UNIT_SIZE); if (gridX < 0 || gridZ < 0 || gridZ >= MAP_SIZE || gridX >= MAP_SIZE) return true; return false; } const points = [ { x: x + PLAYER_RADIUS, z: z + PLAYER_RADIUS }, { x: x - PLAYER_RADIUS, z: z + PLAYER_RADIUS }, { x: x + PLAYER_RADIUS, z: z - PLAYER_RADIUS }, { x: x - PLAYER_RADIUS, z: z - PLAYER_RADIUS } ]; for (const p of points) { const gridX = Math.floor(p.x / UNIT_SIZE); const gridZ = Math.floor(p.z / UNIT_SIZE); if (exitConfig) { if (exitConfig.side === 'east' && gridX >= MAP_SIZE - 1 && gridZ === exitConfig.z) continue; if (exitConfig.side === 'south' && gridZ >= MAP_SIZE - 1 && gridX === exitConfig.x) continue; } if (gridX < 0 || gridZ < 0 || gridX >= MAP_SIZE || gridZ >= MAP_SIZE) return true; if (gridX < MAP_SIZE && map[gridZ] && map[gridZ][gridX] === 1) return true; } return false; }
+function activateSuperJump() { currentJumpForce = JUMP_SUPER; powerupHud.style.display = 'block'; let secondsLeft = 15; timerVal.innerText = secondsLeft; if (powerupTimerInterval) clearInterval(powerupTimerInterval); powerupTimerInterval = setInterval(() => { secondsLeft--; timerVal.innerText = secondsLeft; if (secondsLeft <= 0) { clearInterval(powerupTimerInterval); currentJumpForce = JUMP_NORMAL; powerupHud.style.display = 'none'; } }, 1000); }
+function activateGhostMode() { isGhost = true; socket.emit('toggleGhost', true); ghostHud.style.display = 'block'; let secondsLeft = 3; ghostTimer.innerText = secondsLeft; if (ghostInterval) clearInterval(ghostInterval); ghostInterval = setInterval(() => { secondsLeft--; ghostTimer.innerText = secondsLeft; if (secondsLeft <= 0) { clearInterval(ghostInterval); isGhost = false; socket.emit('toggleGhost', false); ghostHud.style.display = 'none'; const gridX = Math.floor(camera.position.x / UNIT_SIZE); const gridZ = Math.floor(camera.position.z / UNIT_SIZE); if (map[gridZ][gridX] === 1) { const dirs = [[0,1], [0,-1], [1,0], [-1,0]]; for(let d of dirs) { const nx = gridX + d[0]; const nz = gridZ + d[1]; if (nx > 0 && nx < MAP_SIZE && nz > 0 && nz < MAP_SIZE) { if (map[nz][nx] === 0) { camera.position.x = (nx * UNIT_SIZE) + (UNIT_SIZE/2); camera.position.z = (nz * UNIT_SIZE) + (UNIT_SIZE/2); velocity.set(0,0,0); return; } } } } } }, 1000); }
+function triggerTrap(trapId) { isTrapped = true; vineCage.visible = true; trappedWarning.style.display = 'block'; socket.emit('trapTriggered', trapId); let timeLeft = 10; trapTimer.innerText = timeLeft; if (trapInterval) clearInterval(trapInterval); trapInterval = setInterval(() => { timeLeft--; trapTimer.innerText = timeLeft; if (timeLeft <= 0) { clearInterval(trapInterval); isTrapped = false; vineCage.visible = false; trappedWarning.style.display = 'none'; } }, 1000); }
+function checkItems() { for (let i = items.length - 1; i >= 0; i--) { const item = items[i]; item.rotation.y += 0.02; if (item.userData.type === 'scrambler' && item.userData.dish) item.userData.dish.rotation.y += 0.1; if (item.userData.mist) { item.userData.mist.rotation.y -= 0.05; item.userData.mist.rotation.x += 0.02; } const dist = camera.position.distanceTo(item.position); if (dist < 1.5) { socket.emit('itemCollected', item.userData.id); if (item.userData.type === 'boot') activateSuperJump(); else if (item.userData.type === 'orb') { blindHud.style.display = 'block'; let atkTime = 15; blindAtkTimer.innerText = atkTime; const atkInt = setInterval(() => { atkTime--; blindAtkTimer.innerText = atkTime; if(atkTime<=0) clearInterval(atkInt); }, 1000); setTimeout(() => { blindHud.style.display = 'none'; }, 15000); } else if (item.userData.type === 'brick') { hasBrick = true; brickHud.style.display = 'block'; hasTrap = false; trapHud.style.display = 'none'; hasPepper = false; pepperHud.style.display = 'none'; } else if (item.userData.type === 'trap') { hasTrap = true; trapHud.style.display = 'block'; hasBrick = false; brickHud.style.display = 'none'; hasPepper = false; pepperHud.style.display = 'none'; } else if (item.userData.type === 'pepper') { hasPepper = true; pepperHud.style.display = 'block'; hasBrick = false; brickHud.style.display = 'none'; hasTrap = false; trapHud.style.display = 'none'; } else if (item.userData.type === 'hindered') { feedbackHud.style.display = 'block'; setTimeout(() => { feedbackHud.style.display = 'none'; }, 3000); } else if (item.userData.type === 'scrambler') { feedbackHud.style.display = 'block'; setTimeout(() => { feedbackHud.style.display = 'none'; }, 3000); } } } }
 
 function animate() {
     requestAnimationFrame(animate);
-
-    const time = performance.now();
-    let delta = (time - prevTime) / 1000;
-    prevTime = time;
-
-    if (!map) {
-        renderer.render(scene, camera);
-        return;
-    }
-
+    const time = performance.now(); let delta = (time - prevTime) / 1000; prevTime = time;
+    if (!map) { renderer.render(scene, camera); return; }
     if (delta > 0.1) delta = 0.1;
-
     checkItems();
-
-    if (!isTrapped && !isFlying) {
-        placedTraps.forEach(trap => {
-            const dist = Math.sqrt(
-                Math.pow(trap.x - camera.position.x, 2) + 
-                Math.pow(trap.z - camera.position.z, 2)
-            );
-            if (dist < 1.0) {
-                triggerTrap(trap.id);
-            }
-        });
-    }
-
+    if (!isTrapped && !isFlying) { placedTraps.forEach(trap => { const dist = Math.sqrt(Math.pow(trap.x - camera.position.x, 2) + Math.pow(trap.z - camera.position.z, 2)); if (dist < 1.0) triggerTrap(trap.id); }); }
     const inputVelocity = new THREE.Vector3();
-    
     if (controls.isLocked === true && !gameEnded && !isTrapped && !isFrozen) {
-        const forwardVector = new THREE.Vector3();
-        controls.getDirection(forwardVector);
-        forwardVector.y = 0; 
-        forwardVector.normalize();
-
-        const rightVector = new THREE.Vector3();
-        rightVector.crossVectors(forwardVector, new THREE.Vector3(0, 1, 0));
-        rightVector.normalize();
-
-        if (isInverted) {
-            if (moveForward) inputVelocity.sub(forwardVector); 
-            if (moveBackward) inputVelocity.add(forwardVector); 
-            if (moveRight) inputVelocity.sub(rightVector); 
-            if (moveLeft) inputVelocity.add(rightVector); 
-        } else {
-            if (moveForward) inputVelocity.add(forwardVector);
-            if (moveBackward) inputVelocity.sub(forwardVector);
-            if (moveRight) inputVelocity.add(rightVector);
-            if (moveLeft) inputVelocity.sub(rightVector);
-        }
-        
+        const forwardVector = new THREE.Vector3(); controls.getDirection(forwardVector); forwardVector.y = 0; forwardVector.normalize();
+        const rightVector = new THREE.Vector3(); rightVector.crossVectors(forwardVector, new THREE.Vector3(0, 1, 0)); rightVector.normalize();
+        if (isInverted) { if (moveForward) inputVelocity.sub(forwardVector); if (moveBackward) inputVelocity.add(forwardVector); if (moveRight) inputVelocity.sub(rightVector); if (moveLeft) inputVelocity.add(rightVector); } 
+        else { if (moveForward) inputVelocity.add(forwardVector); if (moveBackward) inputVelocity.sub(forwardVector); if (moveRight) inputVelocity.add(rightVector); if (moveLeft) inputVelocity.sub(rightVector); }
         inputVelocity.normalize();
-        
-        // --- FIXED: WIN CONDITION ---
-        if (exitConfig) {
-            const gx = Math.floor(camera.position.x / UNIT_SIZE);
-            const gz = Math.floor(camera.position.z / UNIT_SIZE);
-            // Must go PAST the map boundary to trigger win
-            if (exitConfig.side === 'east') { if(gx >= MAP_SIZE) socket.emit('playerWon'); }
-            else { if(gz >= MAP_SIZE) socket.emit('playerWon'); }
-        } else if (camera.position.x > WORLD_SIZE) socket.emit('playerWon'); 
+        if (exitConfig) { const gx = Math.floor(camera.position.x / UNIT_SIZE); const gz = Math.floor(camera.position.z / UNIT_SIZE); if (exitConfig.side === 'east') { if(gx >= MAP_SIZE) socket.emit('playerWon'); } else { if(gz >= MAP_SIZE) socket.emit('playerWon'); } } else if (camera.position.x > WORLD_SIZE) socket.emit('playerWon'); 
     }
-
     const currentSpeed = isFlying ? FLY_MOVE_SPEED : WALK_SPEED;
-
-    if (inputVelocity.length() > 0) {
-        velocity.x -= velocity.x * 10.0 * delta; 
-        velocity.z -= velocity.z * 10.0 * delta;
-        velocity.x += inputVelocity.x * currentSpeed * delta;
-        velocity.z += inputVelocity.z * currentSpeed * delta;
-    } else {
-        velocity.x -= velocity.x * 10.0 * delta; 
-        velocity.z -= velocity.z * 10.0 * delta;
-    }
-
-    if (isFlying) {
-        velocity.y = 0;
-        if (flyUp) velocity.y = FLY_VERTICAL_SPEED;
-        if (flyDown) velocity.y = -FLY_VERTICAL_SPEED;
-        camera.position.x += velocity.x * delta;
-        camera.position.z += velocity.z * delta;
-        camera.position.y += velocity.y * delta;
-    } else {
-        velocity.y -= GRAVITY * delta;
-        
-        const steps = 10;
-        const subDelta = delta / steps;
-        for (let i = 0; i < steps; i++) {
-            const originalX = camera.position.x;
-            camera.position.x += velocity.x * subDelta;
-            if (checkCollision(camera.position.x, camera.position.z)) {
-                camera.position.x = originalX;
-                velocity.x = 0; 
-            }
-            const originalZ = camera.position.z;
-            camera.position.z += velocity.z * subDelta;
-            if (checkCollision(camera.position.x, camera.position.z)) {
-                camera.position.z = originalZ;
-                velocity.z = 0; 
-            }
-        }
-        camera.position.y += velocity.y * delta;
-        
-        if (camera.position.y < -10) {
-            camera.position.set(4.5, CAM_HEIGHT, 4.5);
-            velocity.set(0,0,0);
-        }
-
-        if (camera.position.y < CAM_HEIGHT) {
-            velocity.y = 0;
-            camera.position.y = CAM_HEIGHT;
-            canJump = true;
-        }
-    }
-
-    const lookDir = new THREE.Vector3();
-    camera.getWorldDirection(lookDir);
-    const myRotation = Math.atan2(lookDir.x, lookDir.z) + Math.PI;
-
-    socket.emit('playerMovement', {
-        x: camera.position.x,
-        y: camera.position.y,
-        z: camera.position.z,
-        rotation: myRotation
-    });
-
-    if (minimapPlayer) {
-        const pctX = camera.position.x / WORLD_SIZE;
-        const pctZ = camera.position.z / WORLD_SIZE;
-        minimapPlayer.style.left = (pctX * 100) + '%';
-        minimapPlayer.style.top = (pctZ * 100) + '%';
-    }
-
+    if (inputVelocity.length() > 0) { velocity.x -= velocity.x * 10.0 * delta; velocity.z -= velocity.z * 10.0 * delta; velocity.x += inputVelocity.x * currentSpeed * delta; velocity.z += inputVelocity.z * currentSpeed * delta; } else { velocity.x -= velocity.x * 10.0 * delta; velocity.z -= velocity.z * 10.0 * delta; }
+    if (isFlying) { velocity.y = 0; if (flyUp) velocity.y = FLY_VERTICAL_SPEED; if (flyDown) velocity.y = -FLY_VERTICAL_SPEED; camera.position.x += velocity.x * delta; camera.position.z += velocity.z * delta; camera.position.y += velocity.y * delta; } else { velocity.y -= GRAVITY * delta; const steps = 10; const subDelta = delta / steps; for (let i = 0; i < steps; i++) { const originalX = camera.position.x; camera.position.x += velocity.x * subDelta; if (checkCollision(camera.position.x, camera.position.z)) { camera.position.x = originalX; velocity.x = 0; } const originalZ = camera.position.z; camera.position.z += velocity.z * subDelta; if (checkCollision(camera.position.x, camera.position.z)) { camera.position.z = originalZ; velocity.z = 0; } } camera.position.y += velocity.y * delta; if (camera.position.y < -10) { camera.position.set(4.5, CAM_HEIGHT, 4.5); velocity.set(0,0,0); } if (camera.position.y < CAM_HEIGHT) { velocity.y = 0; camera.position.y = CAM_HEIGHT; canJump = true; } }
+    const lookDir = new THREE.Vector3(); camera.getWorldDirection(lookDir); const myRotation = Math.atan2(lookDir.x, lookDir.z) + Math.PI;
+    socket.emit('playerMovement', { x: camera.position.x, y: camera.position.y, z: camera.position.z, rotation: myRotation });
+    if (minimapPlayer) { const pctX = camera.position.x / WORLD_SIZE; const pctZ = camera.position.z / WORLD_SIZE; minimapPlayer.style.left = (pctX * 100) + '%'; minimapPlayer.style.top = (pctZ * 100) + '%'; }
     const t = time * 0.01; 
     Object.keys(otherPlayers).forEach(id => {
-        const player = otherPlayers[id];
-        const dist = player.position.distanceTo(player.userData.lastPos);
-        if (dist > 0.001) {
-            const swing = Math.sin(t) * 0.5; 
-            player.userData.limbs.leftArm.rotation.x = swing;
-            player.userData.limbs.rightLeg.rotation.x = swing;
-            player.userData.limbs.rightArm.rotation.x = -swing;
-            player.userData.limbs.leftLeg.rotation.x = -swing;
-        } else {
-            player.userData.limbs.leftArm.rotation.x = 0;
-            player.userData.limbs.rightLeg.rotation.x = 0;
-            player.userData.limbs.rightArm.rotation.x = 0;
-            player.userData.limbs.leftLeg.rotation.x = 0;
-        }
+        const player = otherPlayers[id]; const dist = player.position.distanceTo(player.userData.targetPos);
+        if (dist > 3.0) player.position.copy(player.userData.targetPos);
+        else if (dist > 0.01) { const speed = 6.0; const step = speed * delta; const dir = new THREE.Vector3().subVectors(player.userData.targetPos, player.position).normalize(); if (step >= dist) player.position.copy(player.userData.targetPos); else player.position.add(dir.multiplyScalar(step)); }
+        const currentRot = player.rotation.y; const targetRot = player.userData.targetRot; player.rotation.y += (targetRot - currentRot) * 0.1;
+        if (dist > 0.01) { const swing = Math.sin(t) * 0.5; player.userData.limbs.leftArm.rotation.x = swing; player.userData.limbs.rightLeg.rotation.x = swing; player.userData.limbs.rightArm.rotation.x = -swing; player.userData.limbs.leftLeg.rotation.x = -swing; } else { player.userData.limbs.leftArm.rotation.x = 0; player.userData.limbs.rightLeg.rotation.x = 0; player.userData.limbs.rightArm.rotation.x = 0; player.userData.limbs.leftLeg.rotation.x = 0; }
         player.userData.lastPos.copy(player.position);
     });
-
     renderer.render(scene, camera);
 }
-
-// AUTO-LOGIN CHECK
 const savedToken = localStorage.getItem('gm_session');
-if (savedToken) {
-    socket.emit('verifySession', savedToken);
-}
-
+if (savedToken) socket.emit('verifySession', savedToken);
 animate();

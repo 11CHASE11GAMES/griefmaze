@@ -233,6 +233,28 @@
         .legend-text h4 { margin: 0; color: #fff; }
         .legend-text p { margin: 2px 0 0 0; font-size: 12px; color: #ccc; }
 
+        /* --- SHOP & SKINS GRID (NEW) --- */
+        .skin-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; padding: 10px; }
+        .skin-card { background: #333; padding: 15px; border-radius: 8px; border: 1px solid #555; text-align: center; display: flex; flex-direction: column; align-items: center; }
+        .skin-card h3 { margin: 5px 0; color: #fff; font-size: 16px; }
+        .skin-card p { color: #aaa; font-size: 12px; margin-bottom: 10px; }
+        
+        /* VISUAL PREVIEW BOX */
+        .skin-preview { 
+            width: 80px; height: 80px; 
+            background-color: #555; 
+            margin-bottom: 10px; 
+            border-radius: 5px; 
+            border: 2px solid #222; 
+            background-size: cover; 
+            background-position: center; 
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.5); 
+            display: inline-block;
+        }
+
+        .btn-unlock { width: 100%; padding: 8px; border: none; border-radius: 4px; color: white; font-weight: bold; cursor: pointer; }
+
+
         /* --- HUD --- */
         #minimap { position: absolute; top: 20px; right: 20px; width: 150px; height: 150px; background: rgba(0,0,0,0.5); border: 2px solid rgba(255,255,255,0.5); transition: filter 0.5s; }
         .jammed { filter: blur(8px) contrast(200%) hue-rotate(90deg); }
@@ -329,7 +351,7 @@
         <div class="menu-box">
             <div id="resume-hint">(Press ESC to Resume)</div>
             <div class="menu-title">GRIEFMAZE.IO</div>
-            <div class="beta-tag">BETA v0.2</div>
+            <div class="beta-tag">BETA v0.3</div>
             
             <button id="account-btn"><i class="fas fa-user"></i> <span id="account-status">Login / Sign Up</span></button>
             
@@ -365,25 +387,22 @@
         <div id="changelog" class="side-panel">
             <h3>Update Log</h3>
             <div class="log-entry">
-                <div class="log-version">v0.2 - The Fix Update</div>
+                <div class="log-version">v0.3 - The Skin Update</div>
                 <div class="log-date">Live Now</div>
                 <ul class="log-list">
-                    <li>Added "I'm Stuck!" button to menu.</li>
-                    <li>Fixed getting stuck in walls (Auto-Detect).</li>
-                    <li>Fixed Host transfer issues.</li>
-                    <li>Fixed Name Duplication (Guest 1, 2...).</li>
-                    <li>Fixed Chat Report clicking bugs.</li>
-                    <li>Added Chat Message Limit (50).</li>
-                    <li>Improved Security & Anti-Cheat.</li>
+                    <li>Added Skin System! (Default, Beta Merch, Blueprint)</li>
+                    <li>Added Shop and Customize menu tabs.</li>
+                    <li>Server stability improvements.</li>
+                    <li>Various bug fixes and optimizations.</li>
                 </ul>
             </div>
             <div class="log-entry">
-                <div class="log-version">v0.1 - Launch</div>
-                <div class="log-date">Initial Release</div>
+                <div class="log-version">v0.2 - The Fix Update</div>
+                <div class="log-date">Previous</div>
                 <ul class="log-list">
-                    <li>Multiplayer Maze Gameplay.</li>
-                    <li>Accounts, Stats, & Leaderboards.</li>
-                    <li>8 Unique Items & Traps.</li>
+                    <li>Added "I'm Stuck!" button to menu.</li>
+                    <li>Fixed getting stuck in walls.</li>
+                    <li>Improved Security & Anti-Cheat.</li>
                 </ul>
             </div>
         </div>
@@ -518,8 +537,23 @@
         </div>
     </div>
     
-    <div id="modal-shop" class="modal"><div class="modal-content"><span class="close-btn" onclick="document.getElementById('modal-shop').style.display='none'">&times;</span><h2>Shop</h2><p>Coming Soon...</p></div></div>
-    <div id="modal-customize" class="modal"><div class="modal-content"><span class="close-btn" onclick="document.getElementById('modal-customize').style.display='none'">&times;</span><h2>Skins</h2><p>Coming Soon...</p></div></div>
+    <div id="modal-shop" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" onclick="document.getElementById('modal-shop').style.display='none'">&times;</span>
+            <h2>Item Shop</h2>
+            <div id="shop-content" class="skin-grid">
+                </div>
+        </div>
+    </div>
+
+    <div id="modal-customize" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" onclick="document.getElementById('modal-customize').style.display='none'">&times;</span>
+            <h2>My Skins</h2>
+            <div id="cust-content" class="skin-grid">
+                </div>
+        </div>
+    </div>
 
     <div id="round-over-screen" class="end-screen">
         <div id="result-title">ROUND OVER</div>
