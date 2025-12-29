@@ -44,6 +44,27 @@ const reportSchema = new mongoose.Schema({
 
 const Report = mongoose.model('Report', reportSchema);
 
+// --- GLOBAL STATS SCHEMA (Updated) ---
+const globalStatsSchema = new mongoose.Schema({
+    id: { type: String, default: 'global' },
+    totalConnections: { type: Number, default: 0 }, // Total site visits
+    totalGamesPlayed: { type: Number, default: 0 }, // Total rounds finished
+    lobbiesCreated: {
+        public: { type: Number, default: 0 },
+        private: { type: Number, default: 0 }
+    }
+});
+const GlobalStats = mongoose.model('GlobalStats', globalStatsSchema);
+
+// Helper to safely update stats
+async function incrementGlobalStat(field, amount = 1) {
+    try {
+        const update = {};
+        update[field] = amount;
+        await GlobalStats.findOneAndUpdate({ id: 'global' }, { $inc: update }, { upsert: true });
+    } catch (e) { console.error("Stat Error:", e); }
+}
+
 app.use(express.static('public'));
 app.use('/build', express.static(__dirname + '/node_modules/three/build'));
 app.use('/jsm', express.static(__dirname + '/node_modules/three/examples/jsm'));
@@ -468,6 +489,9 @@ class GameLobby {
     }
 
     endRound(winnerIds, winningDistance = 0) {
+        // GLOBAL STAT: Count total games played
+        incrementGlobalStat('totalGamesPlayed');
+
         if(this.timerInterval) clearInterval(this.timerInterval);
         this.state = 'ended';
         this.isRoundActive = false;
@@ -524,6 +548,9 @@ function createLobby(settings, isPrivate) {
 }
 
 io.on('connection', (socket) => {
+    // GLOBAL STAT: Count every connection
+    incrementGlobalStat('totalConnections');
+    
     socket.data = { name: "Guest", isAuthenticated: false, dbId: null };
 
     // --- AUTH ---
@@ -580,11 +607,9 @@ io.on('connection', (socket) => {
             const user = await User.findById(socket.data.dbId);
             if (!user) return socket.emit('authError', 'User not found.');
 
-            // Verify Old Password
             const isMatch = await bcrypt.compare(oldPassword, user.password);
             if (!isMatch) return socket.emit('authError', 'Current password incorrect.');
 
-            // Hash & Save New Password
             user.password = await bcrypt.hash(newPassword, 10);
             await user.save();
             
@@ -593,6 +618,56 @@ io.on('connection', (socket) => {
             console.error(e);
             socket.emit('authError', 'Failed to update password.');
         }
+    });
+
+    // ==============================
+    // ADMIN DASHBOARD LOGIC
+    // ==============================
+    socket.on('reqAdminData', async () => {
+        if (!socket.data.isAuthenticated || socket.data.name !== '11CHASE11') {
+            return socket.emit('adminError', 'ACCESS DENIED: You are not 11CHASE11.');
+        }
+
+        try {
+            const totalUsers = await User.countDocuments({});
+            const globalStats = await GlobalStats.findOne({ id: 'global' }) || {};
+            
+            // Get reports with chatLogs included
+            const playerReports = await Report.find({ category: { $ne: 'BUG' } }).sort({ timestamp: -1 }).limit(20);
+            const bugReports = await Report.find({ category: 'BUG' }).sort({ timestamp: -1 }).limit(20);
+
+            socket.emit('resAdminData', {
+                stats: { 
+                    users: totalUsers, 
+                    connections: globalStats.totalConnections || 0,
+                    games: globalStats.totalGamesPlayed || 0,
+                    lobbies: globalStats.lobbiesCreated || { public: 0, private: 0 }
+                },
+                reports: playerReports,
+                bugs: bugReports
+            });
+        } catch (e) {
+            console.error(e);
+            socket.emit('adminError', 'Database Error');
+        }
+    });
+
+    socket.on('adminBanUser', async (targetName) => {
+        if (socket.data.name !== '11CHASE11') return;
+        try {
+            const user = await User.findOneAndUpdate({ username: targetName }, { isBanned: true });
+            if (user) {
+                socket.emit('adminActionSuccess', `Banned user: ${targetName}`);
+            } else {
+                socket.emit('adminError', 'User not found');
+            }
+        } catch (e) { socket.emit('adminError', 'Ban failed'); }
+    });
+
+    socket.on('adminDeleteReport', async (reportId) => {
+        if (socket.data.name !== '11CHASE11') return;
+        await Report.findByIdAndDelete(reportId);
+        socket.emit('adminActionSuccess', 'Report deleted');
     });
 
     // --- STATE TOGGLES (Secure Unstuck) ---
@@ -639,59 +714,6 @@ io.on('connection', (socket) => {
             category: "BUG", details: data.details, lobbyId: socketToLobby.get(socket.id) || 'Unknown', chatLogs: []
         });
         await report.save();
-    });
-
-    // ==============================
-    // ADMIN DASHBOARD LOGIC
-    // ==============================
-    socket.on('reqAdminData', async () => {
-        // SECURITY CHECK: Only 11CHASE11 can access
-        if (!socket.data.isAuthenticated || socket.data.name !== '11CHASE11') {
-            return socket.emit('adminError', 'ACCESS DENIED: You are not 11CHASE11.');
-        }
-
-        try {
-            // 1. Get Stats
-            const totalUsers = await User.countDocuments({});
-            // Sum of all games played by all users
-            const gamesAgg = await User.aggregate([{ $group: { _id: null, total: { $sum: "$gamesPlayed" } } }]);
-            const totalGames = gamesAgg.length > 0 ? gamesAgg[0].total : 0;
-            
-            // 2. Get Reports (Player Reports)
-            const playerReports = await Report.find({ category: { $ne: 'BUG' } }).sort({ timestamp: -1 }).limit(20);
-            
-            // 3. Get Bugs
-            const bugReports = await Report.find({ category: 'BUG' }).sort({ timestamp: -1 }).limit(20);
-
-            socket.emit('resAdminData', {
-                stats: { users: totalUsers, games: totalGames },
-                reports: playerReports,
-                bugs: bugReports
-            });
-        } catch (e) {
-            console.error(e);
-            socket.emit('adminError', 'Database Error');
-        }
-    });
-
-    socket.on('adminBanUser', async (targetName) => {
-        if (socket.data.name !== '11CHASE11') return;
-        try {
-            const user = await User.findOneAndUpdate({ username: targetName }, { isBanned: true });
-            if (user) {
-                // Kick them if they are online
-                // (Advanced: find their socket and disconnect them, but for now DB ban prevents login)
-                socket.emit('adminActionSuccess', `Banned user: ${targetName}`);
-            } else {
-                socket.emit('adminError', 'User not found');
-            }
-        } catch (e) { socket.emit('adminError', 'Ban failed'); }
-    });
-
-    socket.on('adminDeleteReport', async (reportId) => {
-        if (socket.data.name !== '11CHASE11') return;
-        await Report.findByIdAndDelete(reportId);
-        socket.emit('adminActionSuccess', 'Report deleted');
     });
 
     // --- LOBBY LOGIC ---
@@ -746,6 +768,8 @@ io.on('connection', (socket) => {
             // FIXED DEFAULT: preRoundTime: 10
             const defaultSettings = { maxPlayers: 8, mapSize: 61, preRoundTime: 10, gameTime: 300, allowedItems: { boot:true, brick:true, trap:true, pepper:true, orb:true, swap:true, hindered:true, scrambler:true } };
             targetLobby = createLobby(defaultSettings, false);
+            // GLOBAL STAT: Count Public Lobby
+            incrementGlobalStat('lobbiesCreated.public');
         }
         joinLobby(socket, targetLobby);
     });
@@ -765,6 +789,11 @@ io.on('connection', (socket) => {
         };
         if(settings.mapSize % 2 === 0) settings.mapSize++;
         const lobby = createLobby(settings, data.isPrivate);
+        
+        // GLOBAL STAT: Count Lobby
+        if(data.isPrivate) incrementGlobalStat('lobbiesCreated.private');
+        else incrementGlobalStat('lobbiesCreated.public');
+
         joinLobby(socket, lobby);
         socket.emit('gameCode', lobby.id);
     });
