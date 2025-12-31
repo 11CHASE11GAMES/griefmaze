@@ -28,7 +28,7 @@ const userSchema = new mongoose.Schema({
     equippedSkin: { type: String, default: 'default' },
     settings: {
         fov: { type: Number, default: 75 },
-        renderDist: { type: Number, default: 60 }
+        renderDist: { type: Number, default: 200 }
     }
 });
 const User = mongoose.model('User', userSchema);
@@ -781,7 +781,7 @@ class GameLobby {
             timeLeft: this.timeLeft,
             roundState: this.state,
             hostId: this.hostId,
-            settings: userData.settings || { fov: 75, renderDist: 60 } 
+            settings: userData.settings || { fov: 75, renderDist: 200 } 
         });
 
         socket.to(this.id).emit('newPlayer', this.players[socket.id]);
@@ -1220,7 +1220,7 @@ io.on('connection', (socket) => {
                 sessionToken: token,
                 skins: ['default'], // CHANGED: 'beta_merch' REMOVED to force unlock in shop
                 equippedSkin: 'default',
-                settings: { fov: 75, renderDist: 60 } // NEW
+                settings: { fov: 75, renderDist: 200 } // NEW
             });
             await newUser.save();
             
