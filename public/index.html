@@ -31,9 +31,10 @@
         }
 
         /* --- CHAT --- */
+        /* Z-INDEX UPDATED TO 200 TO SIT ABOVE VICTORY SCREEN */
         #chat-container {
             position: absolute; bottom: 20px; left: 20px; width: 350px; height: 250px;
-            display: flex; flex-direction: column; pointer-events: auto; z-index: 50;
+            display: flex; flex-direction: column; pointer-events: auto; z-index: 200;
         }
         #chat-box {
             flex: 1; overflow-y: auto; background: rgba(0,0,0,0.5); border-radius: 5px 5px 0 0;
@@ -208,17 +209,51 @@
         .close-btn { position: absolute; top: 15px; right: 20px; font-size: 24px; cursor: pointer; color: #ff3333; }
 
         .host-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: left; margin: 15px 0; }
-        .host-label { display: flex; align-items: center; gap: 10px; background: #333; padding: 8px; border-radius: 5px; cursor: pointer; }
-        .host-label input { margin: 0; width: auto; }
+        .host-label { display: flex; justify-content: space-between; align-items: center; gap: 10px; background: #333; padding: 8px; border-radius: 5px; font-size: 14px; }
+        .host-label input { margin: 0; width: 60px; padding: 5px; text-align: center; }
 
         /* REPORT MODAL */
         #report-reason { width: 80%; padding: 10px; background: #111; color: white; border: 2px solid #555; border-radius: 5px; margin: 15px auto; display: block; font-size: 16px; }
         #report-details { width: 80%; height: 80px; padding: 10px; background: #111; color: white; border: 2px solid #555; border-radius: 5px; margin: 0 auto 15px auto; display: block; font-family: inherit; resize: none; }
 
-        /* SETTINGS MODAL */
-        .settings-grid { display: grid; grid-template-columns: 1fr 2fr; gap: 15px; text-align: right; align-items: center; width: 80%; margin: 20px auto; }
-        .settings-grid label { font-size: 18px; color: #ccc; }
-        .settings-grid input[type="range"] { width: 100%; cursor: pointer; }
+        /* SETTINGS MODAL & SLIDER FIX */
+        .settings-grid { display: grid; grid-template-columns: 1fr 2fr; gap: 20px; text-align: right; align-items: center; width: 80%; margin: 20px auto; }
+        .settings-grid label { font-size: 20px; color: #ccc; }
+        
+        /* CUSTOM RANGE SLIDER */
+        .settings-grid input[type="range"] { 
+            -webkit-appearance: none; 
+            width: 100%; 
+            height: 10px; 
+            border-radius: 5px; 
+            background: #444; 
+            outline: none; 
+            opacity: 0.8; 
+            transition: opacity .2s; 
+            cursor: pointer;
+        }
+        .settings-grid input[type="range"]:hover { opacity: 1; }
+        
+        .settings-grid input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; 
+            appearance: none; 
+            width: 25px; 
+            height: 25px; 
+            border-radius: 50%; 
+            background: #00ccff; 
+            cursor: pointer; 
+            box-shadow: 0 0 10px rgba(0, 204, 255, 0.8);
+        }
+        
+        .settings-grid input[type="range"]::-moz-range-thumb {
+            width: 25px; 
+            height: 25px; 
+            border-radius: 50%; 
+            background: #00ccff; 
+            cursor: pointer; 
+            box-shadow: 0 0 10px rgba(0, 204, 255, 0.8);
+            border: none;
+        }
 
         /* --- LEGEND GRID FIXED --- */
         .legend-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; text-align: left; }
@@ -281,8 +316,23 @@
 
         .end-screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: none; justify-content: center; align-items: center; flex-direction: column; color: white; pointer-events: none; z-index: 100; background: rgba(0,0,0,0.9); }
         #result-title { font-size: 60px; font-weight: bold; }
-        #leaderboard { margin-top: 20px; background: rgba(255,255,255,0.1); padding: 20px; border-radius: 10px; width: 400px; }
-        table { width: 100%; border-collapse: collapse; } th, td { padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.2); text-align: left; }
+        
+        /* INCREASED WIDTH TO 600px */
+        #leaderboard { margin-top: 20px; background: rgba(255,255,255,0.1); padding: 20px; border-radius: 10px; width: 600px; }
+        
+        /* TABLE STYLING FOR ALIGNMENT */
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.2); }
+        
+        /* Rank: Centered, Fixed Width */
+        th:nth-child(1), td:nth-child(1) { width: 60px; text-align: center; }
+        
+        /* Name: Aligned Left, Takes Remaining Space */
+        th:nth-child(2), td:nth-child(2) { text-align: left; }
+        
+        /* Distance: Aligned Left (requested), Fixed Width, naturally sits on right due to table structure */
+        th:nth-child(3), td:nth-child(3) { text-align: left; width: 180px; }
+
         #next-round-timer { margin-top: 20px; font-size: 24px; color: yellow; }
         
         #account-btn { background: transparent; border: 1px solid #555; color: #888; padding: 5px 15px; border-radius: 20px; font-size: 14px; margin-bottom: 15px; cursor: pointer; }
@@ -351,7 +401,7 @@
         <div class="menu-box">
             <div id="resume-hint">(Press ESC to Resume)</div>
             <div class="menu-title">GRIEFMAZE.IO</div>
-            <div class="beta-tag">BETA v0.3</div>
+            <div class="beta-tag">BETA v0.4</div>
             
             <button id="account-btn"><i class="fas fa-user"></i> <span id="account-status">Login / Sign Up</span></button>
             
@@ -387,22 +437,22 @@
         <div id="changelog" class="side-panel">
             <h3>Update Log</h3>
             <div class="log-entry">
-                <div class="log-version">v0.3 - The Skin Update</div>
+                <div class="log-version">v0.4 - The Host & Hub Update</div>
                 <div class="log-date">Live Now</div>
                 <ul class="log-list">
-                    <li>Added Skin System! (Default, Beta Merch, Blueprint)</li>
-                    <li>Added Shop and Customize menu tabs.</li>
-                    <li>Server stability improvements.</li>
-                    <li>Various bug fixes and optimizations.</li>
+                    <li><b>New Map:</b> Center Spawn Hub & Omni-directional Exits!</li>
+                    <li><b>Host Tools:</b> Kick Players (Tab) & Custom Item Quantities.</li>
+                    <li><b>Settings:</b> Added Infinite Render Distance.</li>
+                    <li>Increased Max Map Size to 151.</li>
                 </ul>
             </div>
             <div class="log-entry">
-                <div class="log-version">v0.2 - The Fix Update</div>
+                <div class="log-version">v0.31 - The Polish Update</div>
                 <div class="log-date">Previous</div>
                 <ul class="log-list">
-                    <li>Added "I'm Stuck!" button to menu.</li>
-                    <li>Fixed getting stuck in walls.</li>
-                    <li>Improved Security & Anti-Cheat.</li>
+                    <li>Fixed player rotation spinning.</li>
+                    <li>Improved Victory Screen layout & chat.</li>
+                    <li>Security & Stability fixes.</li>
                 </ul>
             </div>
         </div>
@@ -430,22 +480,26 @@
             <span class="close-btn" onclick="document.getElementById('modal-host').style.display='none'">&times;</span>
             <h2>Host Private Game</h2>
             <label>Max Players (2-20): <input type="number" id="host-max-players" value="8" min="2" max="20"></label>
-            <label>Map Size (21-101): <input type="number" id="host-map-size" value="61" min="21" max="101" step="2"></label>
+            <label>Map Size (21-151): <input type="number" id="host-map-size" value="71" min="21" max="151" step="2"></label>
             <label>Pre-Round Time (sec): <input type="number" id="host-pre-time" value="10" min="0" max="60"></label>
             <p style="font-size:12px; color:#aaa; margin-top:-5px;">(Set to 0 for Manual Start)</p>
             <label>Game Time (sec, 0=Inf): <input type="number" id="host-game-time" value="300" min="0"></label>
-            <label class="host-label" style="width:90%;margin:10px auto;"><input type="checkbox" id="host-private"> Private Lobby (Code Only)</label>
             
-            <h3>Allowed Items</h3>
+            <label class="host-label" style="width:60%; margin:10px auto;">
+                <span>Private Lobby (Code Only)</span>
+                <input type="checkbox" id="host-private" style="width: 20px; height: 20px; margin: 0; cursor: pointer;">
+            </label>
+            
+            <h3>Allowed Items (Qty: 0-20)</h3>
             <div class="host-grid">
-                <label class="host-label"><input type="checkbox" id="item-boot" checked> Boots</label>
-                <label class="host-label"><input type="checkbox" id="item-brick" checked> Brick</label>
-                <label class="host-label"><input type="checkbox" id="item-trap" checked> Trap</label>
-                <label class="host-label"><input type="checkbox" id="item-pepper" checked> Pepper</label>
-                <label class="host-label"><input type="checkbox" id="item-orb" checked> Dark Orb</label>
-                <label class="host-label"><input type="checkbox" id="item-swap" checked> Swap</label>
-                <label class="host-label"><input type="checkbox" id="item-hindered" checked> Hinder</label>
-                <label class="host-label"><input type="checkbox" id="item-scrambler" checked> Scrambler</label>
+                <label class="host-label">Boots: <input type="number" id="qty-boot" value="6" min="0" max="20"></label>
+                <label class="host-label">Brick: <input type="number" id="qty-brick" value="6" min="0" max="20"></label>
+                <label class="host-label">Trap: <input type="number" id="qty-trap" value="6" min="0" max="20"></label>
+                <label class="host-label">Pepper: <input type="number" id="qty-pepper" value="6" min="0" max="20"></label>
+                <label class="host-label">Dark Orb: <input type="number" id="qty-orb" value="4" min="0" max="20"></label>
+                <label class="host-label">Swap: <input type="number" id="qty-swap" value="6" min="0" max="20"></label>
+                <label class="host-label">Hinder: <input type="number" id="qty-hindered" value="4" min="0" max="20"></label>
+                <label class="host-label">Scrambler: <input type="number" id="qty-scrambler" value="4" min="0" max="20"></label>
             </div>
             <button id="btn-start-host" class="btn-large btn-host">Create Lobby</button>
         </div>
@@ -529,7 +583,7 @@
                 <div class="legend-item"><div class="legend-icon" style="background:#cd5c5c;">🧱</div><div class="legend-text"><h4>Brick</h4><p>Place Wall (Press E).</p></div></div>
                 <div class="legend-item"><div class="legend-icon" style="background:#228b22;">🌿</div><div class="legend-text"><h4>Vine Trap</h4><p>Place Trap (Press E).</p></div></div>
                 <div class="legend-item"><div class="legend-icon" style="background:#FF0000;">🌶️</div><div class="legend-text"><h4>Ghost Pepper</h4><p>Walk Thru Walls (3s).</p></div></div>
-                <div class="legend-item"><div class="legend-icon" style="background:#0000ff;">🔄</div><div class="legend-text"><h4>Swap</h4><p>Swap locations.</p></div></div>
+                <div class="legend-item"><div class="legend-icon" style="background:#000000;">🔄</div><div class="legend-text"><h4>Swap</h4><p>Swap locations.</p></div></div>
                 <div class="legend-item"><div class="legend-icon" style="background:#000;">⚫</div><div class="legend-text"><h4>Dark Orb</h4><p>Blind others.</p></div></div>
                 <div class="legend-item"><div class="legend-icon" style="background:#9370DB;">🧪</div><div class="legend-text"><h4>Hinder Potion</h4><p>Invert controls.</p></div></div>
                 <div class="legend-item"><div class="legend-icon" style="background:#808080;">📡</div><div class="legend-text"><h4>Scrambler</h4><p>Jam minimap.</p></div></div>
@@ -541,8 +595,7 @@
         <div class="modal-content">
             <span class="close-btn" onclick="document.getElementById('modal-shop').style.display='none'">&times;</span>
             <h2>Item Shop</h2>
-            <div id="shop-content" class="skin-grid">
-                </div>
+            <div id="shop-content" class="skin-grid"></div>
         </div>
     </div>
 
@@ -550,14 +603,13 @@
         <div class="modal-content">
             <span class="close-btn" onclick="document.getElementById('modal-customize').style.display='none'">&times;</span>
             <h2>My Skins</h2>
-            <div id="cust-content" class="skin-grid">
-                </div>
+            <div id="cust-content" class="skin-grid"></div>
         </div>
     </div>
 
     <div id="round-over-screen" class="end-screen">
         <div id="result-title">ROUND OVER</div>
-        <div id="leaderboard"><table><thead><tr><th>Rank</th><th>Name</th><th>Dist</th></tr></thead><tbody id="leaderboard-body"></tbody></table></div>
+        <div id="leaderboard"><table><thead><tr><th>Rank</th><th>Name</th><th>Distance From Exit</th></tr></thead><tbody id="leaderboard-body"></tbody></table></div>
         <div id="next-round-timer">Next: 15s</div>
     </div>
 

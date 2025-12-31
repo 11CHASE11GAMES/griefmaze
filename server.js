@@ -24,9 +24,12 @@ const userSchema = new mongoose.Schema({
     wins: { type: Number, default: 0 },
     gamesPlayed: { type: Number, default: 0 },
     isBanned: { type: Boolean, default: false },
-    // Only 'default' is given initially. Players must "Unlock" beta_merch in the shop.
     skins: { type: [String], default: ['default'] }, 
-    equippedSkin: { type: String, default: 'default' }
+    equippedSkin: { type: String, default: 'default' },
+    settings: {
+        fov: { type: Number, default: 75 },
+        renderDist: { type: Number, default: 60 }
+    }
 });
 const User = mongoose.model('User', userSchema);
 
@@ -106,14 +109,20 @@ class GameLobby {
         this.timerInterval = null;
         this.safetyInterval = null;
         this.botInterval = null;
+        this.nextRoundTimeout = null; // --- FIX: TRACK RESTART TIMER ---
         this.timeLeft = 0;
         this.state = 'waiting'; 
         
         this.setupMap();
         
+        // --- BOT SPAWN FIX: RESPECT MAX PLAYERS ---
         if (!this.isPrivate) {
-            const botCount = Math.floor(Math.random() * 3) + 3; 
-            for(let i=0; i<botCount; i++) this.addBot();
+            const availableSlots = Math.max(0, this.settings.maxPlayers - 2);
+            if (availableSlots > 0) {
+                let botCount = Math.floor(Math.random() * 3) + 3; 
+                if (botCount > availableSlots) botCount = availableSlots;
+                for(let i=0; i<botCount; i++) this.addBot();
+            }
         }
 
         this.safetyInterval = setInterval(() => this.checkStuckPlayers(), 1000);
@@ -265,8 +274,10 @@ class GameLobby {
         const botSkins = ['default', 'beta_merch'];
         const randomSkin = botSkins[Math.floor(Math.random() * botSkins.length)];
 
-        const sx = 4.5;
-        const sz = 4.5;
+        // SPAWN CENTER
+        const center = (this.settings.mapSize * this.UNIT_SIZE) / 2;
+        const sx = center;
+        const sz = center;
 
         this.players[botId] = {
             x: sx, y: 1.6, z: sz, rotation: 0,
@@ -283,20 +294,25 @@ class GameLobby {
             vy: 0, 
             lookOffset: 0,
             lastX: sx, lastZ: sz, stuckTicks: 0,
-            lastGx: 1, lastGz: 1,
+            lastGx: Math.floor(center/3), lastGz: Math.floor(center/3),
             skin: randomSkin 
         };
         
         this.assignBotTarget(this.players[botId]);
         io.to(this.id).emit('newPlayer', this.players[botId]);
+        
+        this.logAndBroadcast(`${name} joined the game.`, 'join');
     }
 
     removeBot() {
         const botIds = Object.keys(this.players).filter(id => this.players[id].isBot);
         if (botIds.length > 0) {
             const removeId = botIds[botIds.length - 1]; 
+            const pName = this.players[removeId].name;
             delete this.players[removeId];
+            
             io.to(this.id).emit('playerDisconnected', removeId);
+            this.logAndBroadcast(`${pName} left the game.`, 'leave');
         }
     }
 
@@ -332,9 +348,9 @@ class GameLobby {
             // STUCK MONITOR
             const movedDist = Math.abs(p.x - p.lastX) + Math.abs(p.z - p.lastZ);
             
-            let dx = p.targetX - p.x;
-            let dz = p.targetZ - p.z;
-            const targetAngle = Math.atan2(dx, dz) + Math.PI; 
+            let diffX = p.targetX - p.x;
+            let diffZ = p.targetZ - p.z;
+            const targetAngle = Math.atan2(diffX, diffZ) + Math.PI; 
             
             let angleDiff = Math.abs(targetAngle - p.rotation);
             while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
@@ -423,7 +439,7 @@ class GameLobby {
             }
 
             // ROTATION & MOVEMENT
-            let dist = Math.sqrt(dx*dx + dz*dz); 
+            let dist = Math.sqrt(diffX*diffX + diffZ*diffZ); 
 
             if (dist < 0.4) {
                 if (p.currentPath.length > 0) p.currentPath.shift();
@@ -432,19 +448,20 @@ class GameLobby {
                     const node = p.currentPath[0];
                     const wiggleX = (Math.random() - 0.5) * 0.5;
                     const wiggleZ = (Math.random() - 0.5) * 0.5;
+                    
                     p.targetX = (node.x * this.UNIT_SIZE) + (this.UNIT_SIZE/2) + wiggleX;
                     p.targetZ = (node.z * this.UNIT_SIZE) + (this.UNIT_SIZE/2) + wiggleZ;
                 } else {
                     this.assignBotTarget(p);
                 }
                 
-                dx = p.targetX - p.x;
-                dz = p.targetZ - p.z;
-                dist = Math.sqrt(dx*dx + dz*dz);
+                diffX = p.targetX - p.x;
+                diffZ = p.targetZ - p.z;
+                dist = Math.sqrt(diffX*diffX + diffZ*diffZ);
             }
 
             if (dist > 0.1) {
-                const newTargetAngle = Math.atan2(dx, dz) + Math.PI; 
+                const newTargetAngle = Math.atan2(diffX, diffZ) + Math.PI; 
                 
                 if(Math.random() < 0.1) p.lookOffset = (Math.random() - 0.5) * 0.5;
                 
@@ -736,9 +753,12 @@ class GameLobby {
         }
 
         pName = this.getUniqueName(pName, socket.id);
+        
+        // --- SPAWN CENTER CALCULATION ---
+        const center = (this.settings.mapSize * this.UNIT_SIZE) / 2;
 
         this.players[socket.id] = {
-            x: 4.5, y: 1.6, z: 4.5, rotation: 0,
+            x: center, y: 1.6, z: center, rotation: 0,
             playerId: socket.id,
             name: pName,
             isTrapped: false,
@@ -760,7 +780,8 @@ class GameLobby {
             maxPlayers: this.settings.maxPlayers,
             timeLeft: this.timeLeft,
             roundState: this.state,
-            hostId: this.hostId 
+            hostId: this.hostId,
+            settings: userData.settings || { fov: 75, renderDist: 60 } 
         });
 
         socket.to(this.id).emit('newPlayer', this.players[socket.id]);
@@ -784,8 +805,23 @@ class GameLobby {
         this.logAndBroadcast(`${pName} left the game.`, 'leave');
 
         // BOT LOGIC: If room has humans left but < 5 bots, add one back
-        if (this.getHumanCount() > 0 && this.getBotCount() < 5 && !this.isPrivate) {
-            this.addBot();
+        if (!this.isPrivate) {
+             // 1. Calculate Active Bot Lobbies
+             let lobbiesWithBots = 0;
+             // NOTE: 'lobbies' map is defined below, but accessible here due to scope
+             if (typeof lobbies !== 'undefined') {
+                 lobbies.forEach(l => {
+                     if (l.id !== this.id && l.getBotCount() > 0) lobbiesWithBots++;
+                 });
+             }
+
+             // If this lobby already has bots, we can refill it.
+             // If this lobby has 0 bots, we only add if total bot lobbies < 2.
+             const canAddBot = (this.getBotCount() > 0) || (lobbiesWithBots < 2);
+
+             if (canAddBot && this.getHumanCount() > 0 && this.getBotCount() < 5) {
+                 this.addBot();
+             }
         }
 
         if (socketId === this.hostId) {
@@ -800,14 +836,8 @@ class GameLobby {
             }
         }
         
-        // ZOMBIE PREVENTION: If no humans, destroy lobby
-        if (this.getHumanCount() === 0) {
-            clearInterval(this.timerInterval);
-            clearInterval(this.safetyInterval);
-            clearInterval(this.botInterval);
-            // Will be deleted by lobby manager loop check
-            console.log('Destroyed Lobby:', this.id);
-        }
+        // FIX: REMOVED ZOMBIE DESTRUCTION HERE
+        // Destruction is now handled in leaveCurrentLobby to prevent double logs
     }
 
     logAndBroadcast(text, type='system', senderName=null, senderId=null) {
@@ -836,7 +866,11 @@ class GameLobby {
         if (size % 2 === 0) size++;
         const m = [];
         for (let i = 0; i < size; i++) m.push(new Array(size).fill(1));
-        const stack = [[1, 1]]; m[1][1] = 0; 
+        
+        // --- 1. GENERATE MAZE FIRST ---
+        // Start at a guaranteed valid spot (e.g., 1,1) to ensure the whole grid is filled
+        const stack = [[1, 1]]; 
+        m[1][1] = 0; 
         const dirs = [[0, -2], [0, 2], [-2, 0], [2, 0]];
 
         while (stack.length) {
@@ -855,6 +889,7 @@ class GameLobby {
             } else stack.pop();
         }
         
+        // Random loops to reduce dead ends
         for (let z = 2; z < size - 2; z++) {
             for (let x = 2; x < size - 2; x++) {
                 if (m[z][x] === 1) {
@@ -865,17 +900,43 @@ class GameLobby {
             }
         }
 
-        const side = Math.random() > 0.5 ? 'east' : 'south';
-        const minIndex = Math.floor(size / 2);
-        const maxIndex = size - 2;
-        let randomCoord = Math.floor(Math.random() * (maxIndex - minIndex + 1)) + minIndex;
-        if (randomCoord % 2 === 0) randomCoord++; 
-        if (randomCoord > maxIndex) randomCoord = maxIndex - 1;
+        // --- 2. CARVE CENTER HUB (3x3) ---
+        // Range -1 to 1 (3 tiles total: -1, 0, 1)
+        const cx = Math.floor(size / 2);
+        const cz = Math.floor(size / 2);
+        
+        for (let z = -1; z <= 1; z++) {
+            for (let x = -1; x <= 1; x++) {
+                if(cx+x > 0 && cx+x < size-1 && cz+z > 0 && cz+z < size-1) {
+                    m[cz+z][cx+x] = 0; 
+                }
+            }
+        }
 
+        // --- 3. RANDOM EXIT ON ANY EDGE ---
+        const sides = ['north', 'south', 'east', 'west'];
+        const side = sides[Math.floor(Math.random() * sides.length)];
+        
         let exitX, exitZ;
-        if (side === 'east') { exitX = size - 2; exitZ = randomCoord; m[exitZ][size - 1] = 0; } 
-        else { exitX = randomCoord; exitZ = size - 2; m[size - 1][exitX] = 0; }
-        m[exitZ][exitX] = 0;
+        const randEdge = () => {
+             let r = Math.floor(Math.random() * (size - 4)) + 2; 
+             if(r % 2 === 0) r++;
+             return r;
+        };
+
+        if (side === 'north') {
+            exitX = randEdge(); exitZ = 0; 
+            m[1][exitX] = 0; m[0][exitX] = 0;
+        } else if (side === 'south') {
+            exitX = randEdge(); exitZ = size - 1;
+            m[size-2][exitX] = 0; m[size-1][exitX] = 0;
+        } else if (side === 'east') {
+            exitX = size - 1; exitZ = randEdge();
+            m[exitZ][size-2] = 0; m[exitZ][size-1] = 0;
+        } else if (side === 'west') {
+            exitX = 0; exitZ = randEdge();
+            m[exitZ][1] = 0; m[exitZ][0] = 0;
+        }
 
         return { map: m, exit: { x: exitX, z: exitZ, side: side } };
     }
@@ -923,44 +984,63 @@ class GameLobby {
         this.placedTraps = [];
 
         let idCounter = 0;
-        const spawnBatch = (type, count) => {
-            if (!this.settings.allowedItems[type]) return; 
-            for(let i=0; i<count; i++) {
+        
+        // --- ITEM QTY FIX: USE EXACT NUMBER FROM HOST ---
+        // settings.allowedItems is now { boot: 5, brick: 10 ... }
+        const spawnBatch = (type) => {
+            const qty = this.settings.allowedItems[type] || 0; 
+            if (qty <= 0) return;
+            
+            // Safety cap if someone bypassed validation
+            const safeQty = Math.min(qty, 20); // CHANGED 50 to 20
+
+            for(let i=0; i<safeQty; i++) {
                 const loc = this.getSpacedItemLocation();
                 this.activeItems.push({ id: idCounter++, type: type, x: loc.x, z: loc.z });
             }
         };
 
-        const scale = this.settings.mapSize / 61;
-        const count = Math.ceil(5 * scale);
-        
-        spawnBatch('boot', count); spawnBatch('brick', count); 
-        spawnBatch('swap', count); spawnBatch('trap', count); 
-        spawnBatch('pepper', count);
-        spawnBatch('orb', Math.ceil(3 * scale)); 
-        spawnBatch('hindered', Math.ceil(3 * scale)); 
-        spawnBatch('scrambler', Math.ceil(3 * scale));
+        // If public lobby, use defaults. If private, use host settings.
+        if (!this.settings.allowedItems.boot && typeof this.settings.allowedItems.boot !== 'number') {
+            // BACKWARDS COMPATIBILITY / PUBLIC LOBBY DEFAULTS
+            const scale = this.settings.mapSize / 61;
+            const count = Math.ceil(5 * scale);
+            const defaultQty = {
+                boot: count, brick: count, swap: count, trap: count, pepper: count,
+                orb: Math.ceil(3*scale), hindered: Math.ceil(3*scale), scrambler: Math.ceil(3*scale)
+            };
+            this.settings.allowedItems = defaultQty;
+        }
+
+        Object.keys(this.settings.allowedItems).forEach(key => spawnBatch(key));
     }
 
     startNewRound() {
+        // --- FIX: CLEAR PENDING AUTO-RESTART TIMER ---
+        if(this.nextRoundTimeout) clearTimeout(this.nextRoundTimeout);
+        this.nextRoundTimeout = null;
+
         if(this.timerInterval) clearInterval(this.timerInterval);
         this.setupMap();
+        
+        const center = (this.settings.mapSize * this.UNIT_SIZE) / 2;
+
         Object.keys(this.players).forEach(id => {
-            this.players[id].x = 4.5; this.players[id].y = 1.6; 
-            this.players[id].z = 4.5; this.players[id].rotation = 0; 
+            this.players[id].x = center; this.players[id].y = 1.6; 
+            this.players[id].z = center; this.players[id].rotation = 0; 
             this.players[id].isTrapped = false;
             this.players[id].isGhost = false;
             // Reset Bot Targets
             if(this.players[id].isBot) {
-                this.players[id].targetX = 4.5;
-                this.players[id].targetZ = 4.5;
+                this.players[id].targetX = center;
+                this.players[id].targetZ = center;
                 this.players[id].currentPath = [];
                 this.assignBotTarget(this.players[id]); 
             }
             
             // FIX: Force visual reset immediately
             io.to(this.id).emit('playerTeleported', { 
-                id: id, x: 4.5, y: 1.6, z: 4.5, reason: 'reset' 
+                id: id, x: center, y: 1.6, z: center, reason: 'reset' 
             });
         });
 
@@ -1014,23 +1094,39 @@ class GameLobby {
     handleTimeout() {
         clearInterval(this.timerInterval);
         this.isRoundActive = false;
-        let bestDist = Infinity;
-        let winners = [];
+        
+        // 1. Collect all valid human distances
+        let results = [];
         Object.keys(this.players).forEach(pid => {
             const p = this.players[pid];
-            if(p.isBot) return; // Bots can't win via timeout check (simplification)
-            
+            if (p.isBot) return;
+
             const gx = Math.floor(p.x / this.UNIT_SIZE);
             const gz = Math.floor(p.z / this.UNIT_SIZE);
-            if(gx >= 0 && gx < this.settings.mapSize && gz >= 0 && gz < this.settings.mapSize) {
+            
+            // Check bounds
+            if (gx >= 0 && gx < this.settings.mapSize && gz >= 0 && gz < this.settings.mapSize) {
                 const d = this.distanceMap[gz][gx];
-                if(d !== -1) {
-                    if (d < bestDist) { bestDist = d; winners = [pid]; } 
-                    else if (d === bestDist) { winners.push(pid); }
+                if (d !== -1) {
+                    results.push({ id: pid, dist: d });
                 }
             }
         });
-        this.endRound(winners, bestDist);
+
+        // 2. Sort by distance
+        results.sort((a, b) => a.dist - b.dist);
+
+        // 3. Determine winners (allow ties)
+        let winners = [];
+        let winningDist = 0;
+
+        if (results.length > 0) {
+            winningDist = results[0].dist;
+            // Get everyone who matches the best distance
+            winners = results.filter(r => r.dist === winningDist).map(r => r.id);
+        }
+
+        this.endRound(winners, winningDist);
     }
 
     endRound(winnerIds, winningDistance = 0) {
@@ -1081,7 +1177,8 @@ class GameLobby {
             nextRoundIn: 15 
         });
 
-        setTimeout(() => {
+        // --- FIX: SAVE TIMEOUT ID SO WE CAN CANCEL IT ON MANUAL RESTART ---
+        this.nextRoundTimeout = setTimeout(() => {
             if (this.settings.preRoundTime === 0) this.startNewRound();
             else this.startNewRound();
         }, 15000);
@@ -1122,7 +1219,8 @@ io.on('connection', (socket) => {
                 password: hashed, 
                 sessionToken: token,
                 skins: ['default'], // CHANGED: 'beta_merch' REMOVED to force unlock in shop
-                equippedSkin: 'default'
+                equippedSkin: 'default',
+                settings: { fov: 75, renderDist: 60 } // NEW
             });
             await newUser.save();
             
@@ -1131,7 +1229,15 @@ io.on('connection', (socket) => {
             socket.data.dbId = newUser._id;
             socket.data.equippedSkin = newUser.equippedSkin; // Load Skin
 
-            socket.emit('authSuccess', { username: newUser.username, coins: 0, stats: { wins: 0, gamesPlayed: 0 }, token, skins: newUser.skins, equippedSkin: newUser.equippedSkin });
+            socket.emit('authSuccess', { 
+                username: newUser.username, 
+                coins: 0, 
+                stats: { wins: 0, gamesPlayed: 0 }, 
+                token, 
+                skins: newUser.skins, 
+                equippedSkin: newUser.equippedSkin,
+                settings: newUser.settings // Send Settings
+            });
         } catch (e) { socket.emit('authError', 'Server Error'); }
     });
 
@@ -1150,7 +1256,15 @@ io.on('connection', (socket) => {
             socket.data.dbId = user._id;
             socket.data.equippedSkin = user.equippedSkin; // Load Skin
 
-            socket.emit('authSuccess', { username: user.username, coins: user.coins, stats: { wins: user.wins, gamesPlayed: user.gamesPlayed }, token, skins: user.skins, equippedSkin: user.equippedSkin });
+            socket.emit('authSuccess', { 
+                username: user.username, 
+                coins: user.coins, 
+                stats: { wins: user.wins, gamesPlayed: user.gamesPlayed }, 
+                token, 
+                skins: user.skins, 
+                equippedSkin: user.equippedSkin,
+                settings: user.settings // Send Settings
+            });
         } catch (e) { socket.emit('authError', 'Login Failed'); }
     });
 
@@ -1163,8 +1277,24 @@ io.on('connection', (socket) => {
                 socket.data.dbId = user._id;
                 socket.data.equippedSkin = user.equippedSkin; // Load Skin
 
-                socket.emit('authSuccess', { username: user.username, coins: user.coins, stats: { wins: user.wins, gamesPlayed: user.gamesPlayed }, token, skins: user.skins, equippedSkin: user.equippedSkin });
+                socket.emit('authSuccess', { 
+                    username: user.username, 
+                    coins: user.coins, 
+                    stats: { wins: user.wins, gamesPlayed: user.gamesPlayed }, 
+                    token, 
+                    skins: user.skins, 
+                    equippedSkin: user.equippedSkin,
+                    settings: user.settings // Send Settings
+                });
             }
+        } catch (e) { console.error(e); }
+    });
+
+    // --- SETTINGS SAVE LOGIC ---
+    socket.on('saveSettings', async (settings) => {
+        if (!socket.data.isAuthenticated || !socket.data.dbId) return;
+        try {
+            await User.findByIdAndUpdate(socket.data.dbId, { settings: settings });
         } catch (e) { console.error(e); }
     });
 
@@ -1252,15 +1382,33 @@ io.on('connection', (socket) => {
             const playerReports = await Report.find({ category: { $ne: 'BUG' } }).sort({ timestamp: -1 }).limit(20);
             const bugReports = await Report.find({ category: 'BUG' }).sort({ timestamp: -1 }).limit(20);
 
+            // --- NEW: LOBBY DATA ---
+            const activeLobbies = [];
+            lobbies.forEach(l => {
+                const playerList = Object.values(l.players).map(p => ({
+                    name: p.name,
+                    isBot: p.isBot,
+                    id: p.playerId
+                }));
+                activeLobbies.push({
+                    id: l.id,
+                    private: l.isPrivate,
+                    count: l.getPlayerCount(),
+                    max: l.settings.maxPlayers,
+                    players: playerList
+                });
+            });
+
             socket.emit('resAdminData', {
                 stats: { 
                     users: totalUsers, 
                     connections: globalStats.totalConnections || 0,
                     games: globalStats.totalGamesPlayed || 0,
-                    lobbies: globalStats.lobbiesCreated || { public: 0, private: 0 }
+                    lobbies: globalStats.lobbiesCreated || { public: { type: Number, default: 0 }, private: { type: Number, default: 0 } }
                 },
                 reports: playerReports,
-                bugs: bugReports
+                bugs: bugReports,
+                lobbies: activeLobbies
             });
         } catch (e) {
             console.error(e);
@@ -1309,6 +1457,32 @@ io.on('connection', (socket) => {
         if(lobby) lobby.forceUnstuckPlayer(socket.id);
     });
 
+    // --- NEW: KICK COMMAND ---
+    socket.on('kickPlayer', (targetId) => {
+        const lid = socketToLobby.get(socket.id);
+        const lobby = lobbies.get(lid);
+        
+        // Ensure requester is the host
+        if(lobby && lobby.hostId === socket.id) {
+            // Check if target is in this lobby
+            if(lobby.players[targetId]) {
+                const targetName = lobby.players[targetId].name;
+                
+                // If it's a real player (socket exists)
+                const targetSocket = io.sockets.sockets.get(targetId);
+                if(targetSocket) {
+                    targetSocket.emit('kicked');
+                    targetSocket.leave(lid);
+                    socketToLobby.delete(targetId);
+                }
+                
+                // Remove from game logic (works for bots too)
+                lobby.removePlayer(targetId);
+                lobby.logAndBroadcast(`${targetName} was kicked by the host.`, 'system');
+            }
+        }
+    });
+
     // --- REPORTING SYSTEM ---
     socket.on('reportPlayer', async (data) => {
         if (!data || !data.targetId || !data.category) return;
@@ -1342,12 +1516,17 @@ io.on('connection', (socket) => {
                 lobby.removePlayer(socket.id);
                 // Check if empty of HUMANS
                 if(lobby.getHumanCount() === 0) { 
-                    lobbies.delete(lid);
-                    console.log('Destroyed Lobby:', lid); // FIX: Log destruction
-                    // Clear intervals explicitly if not handled in removePlayer
-                    if(lobby.timerInterval) clearInterval(lobby.timerInterval);
-                    if(lobby.safetyInterval) clearInterval(lobby.safetyInterval);
-                    if(lobby.botInterval) clearInterval(lobby.botInterval);
+                    // DEFENSIVE CHECK TO PREVENT DOUBLE LOGS
+                    if (lobbies.has(lid)) {
+                        lobbies.delete(lid);
+                        console.log('Destroyed Lobby:', lid); 
+                        
+                        // Clear intervals explicitly
+                        if(lobby.timerInterval) clearInterval(lobby.timerInterval);
+                        if(lobby.safetyInterval) clearInterval(lobby.safetyInterval);
+                        if(lobby.botInterval) clearInterval(lobby.botInterval);
+                        if(lobby.nextRoundTimeout) clearTimeout(lobby.nextRoundTimeout); // Clear pending round start
+                    }
                 }
             }
             socketToLobby.delete(socket.id);
@@ -1391,7 +1570,17 @@ io.on('connection', (socket) => {
             }
         }
         if (!targetLobby) {
-            const defaultSettings = { maxPlayers: 8, mapSize: 61, preRoundTime: 10, gameTime: 300, allowedItems: { boot:true, brick:true, trap:true, pepper:true, orb:true, swap:true, hindered:true, scrambler:true } };
+            // FIX: EXPLICIT DEFAULT ITEMS
+            const defaultSettings = { 
+                maxPlayers: 8, 
+                mapSize: 71, 
+                preRoundTime: 10, 
+                gameTime: 300, 
+                allowedItems: { 
+                    boot: 6, brick: 6, trap: 6, pepper: 6, 
+                    orb: 4, swap: 6, hindered: 4, scrambler: 4 
+                } 
+            };
             targetLobby = createLobby(defaultSettings, false);
             incrementGlobalStat('lobbiesCreated.public');
         }
@@ -1405,7 +1594,7 @@ io.on('connection', (socket) => {
         
         const settings = {
             maxPlayers: Math.min(Math.max(parseInt(data.maxPlayers)||8, 2), 20),
-            mapSize: Math.min(Math.max(parseInt(data.mapSize)||61, 21), 101),
+            mapSize: Math.min(Math.max(parseInt(data.mapSize)||71, 21), 151),
             preRoundTime: Math.min(Math.max(preTime, 0), 60),
             gameTime: parseInt(data.gameTime),
             allowedItems: data.allowedItems || {}

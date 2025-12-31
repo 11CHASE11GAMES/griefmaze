@@ -1,5 +1,94 @@
 import * as THREE from 'three';
-import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+// Custom PointerLockControls to fix browser snapping issues
+class PointerLockControls extends THREE.EventDispatcher {
+    constructor( camera, domElement ) {
+        super();
+        this.camera = camera;
+        this.domElement = domElement;
+        this.isLocked = false;
+        this.minPolarAngle = 0;
+        this.maxPolarAngle = Math.PI;
+        this.pointerSpeed = 1.0;
+
+        this._onMouseMove = this.onMouseMove.bind( this );
+        this._onPointerlockChange = this.onPointerlockChange.bind( this );
+        this._onPointerlockError = this.onPointerlockError.bind( this );
+
+        this.connect();
+    }
+
+    connect() {
+        this.domElement.ownerDocument.addEventListener( 'mousemove', this._onMouseMove );
+        this.domElement.ownerDocument.addEventListener( 'pointerlockchange', this._onPointerlockChange );
+        this.domElement.ownerDocument.addEventListener( 'pointerlockerror', this._onPointerlockError );
+    }
+
+    disconnect() {
+        this.domElement.ownerDocument.removeEventListener( 'mousemove', this._onMouseMove );
+        this.domElement.ownerDocument.removeEventListener( 'pointerlockchange', this._onPointerlockChange );
+        this.domElement.ownerDocument.removeEventListener( 'pointerlockerror', this._onPointerlockError );
+    }
+
+    dispose() {
+        this.disconnect();
+    }
+
+    getObject() {
+        return this.camera;
+    }
+
+    getDirection( v ) {
+        return v.set( 0, 0, - 1 ).applyQuaternion( this.camera.quaternion );
+    }
+
+    lock() {
+        this.domElement.requestPointerLock();
+    }
+
+    unlock() {
+        this.domElement.ownerDocument.exitPointerLock();
+    }
+
+    onMouseMove( event ) {
+        if ( this.isLocked === false ) return;
+
+        const movementX = event.movementX || event.mozMovementX || event.webkitMovementX || 0;
+        const movementY = event.movementY || event.mozMovementY || event.webkitMovementY || 0;
+
+        // --- CAMERA SNAP PROTECTION ---
+        if ( Math.abs(movementX) > 700 || Math.abs(movementY) > 700 ) return;
+
+        const _euler = new THREE.Euler( 0, 0, 0, 'YXZ' );
+        _euler.setFromQuaternion( this.camera.quaternion );
+
+        _euler.y -= movementX * 0.002 * this.pointerSpeed;
+        _euler.x -= movementY * 0.002 * this.pointerSpeed;
+
+        _euler.x = Math.max( _PI_2 - this.maxPolarAngle, Math.min( _PI_2 - this.minPolarAngle, _euler.x ) );
+
+        this.camera.quaternion.setFromEuler( _euler );
+        this.dispatchEvent( _changeEvent );
+    }
+
+    onPointerlockChange() {
+        if ( this.domElement.ownerDocument.pointerLockElement === this.domElement ) {
+            this.dispatchEvent( _lockEvent );
+            this.isLocked = true;
+        } else {
+            this.dispatchEvent( _unlockEvent );
+            this.isLocked = false;
+        }
+    }
+
+    onPointerlockError() {
+        // Suppress errors
+    }
+}
+
+const _changeEvent = { type: 'change' };
+const _lockEvent = { type: 'lock' };
+const _unlockEvent = { type: 'unlock' };
+const _PI_2 = Math.PI / 2;
 
 // ==========================================
 // 1. SKIN CONFIGURATION
@@ -264,6 +353,7 @@ camera.add(flashlight);
 flashlight.target.position.set(0, 0, -1);
 camera.add(flashlight.target);
 
+// USE CUSTOM POINTER LOCK CONTROLS
 const controls = new PointerLockControls(camera, document.body);
 camera.position.set(1 * UNIT_SIZE + (UNIT_SIZE/2), CAM_HEIGHT, 1 * UNIT_SIZE + (UNIT_SIZE/2));
 
@@ -433,7 +523,12 @@ function createItem(id, type, x, z) {
     else if (type === 'scrambler') {
         const visual = new THREE.Group();
         visual.rotation.z = Math.PI / 6; 
-        const mat = new THREE.MeshStandardMaterial({ color: 0x808080, metalness: 0.8, roughness: 0.2 });
+        const mat = new THREE.MeshStandardMaterial({ 
+            color: 0x808080, 
+            metalness: 0.8, 
+            roughness: 0.2,
+            side: THREE.DoubleSide // Fix: Render both sides
+        });
         const base = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.2, 0.2, 8), mat);
         visual.add(base);
         const dish = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 16, 0, Math.PI * 2, 0, Math.PI * 0.3), mat);
@@ -738,6 +833,28 @@ socket.on('authSuccess', (data) => {
     if (data.skins) myOwnedSkins = data.skins;
     if (data.equippedSkin) myEquippedSkin = data.equippedSkin;
     
+    // Load Settings from server
+    if (data.settings) {
+        if(data.settings.fov) {
+            settingFov.value = data.settings.fov;
+            camera.fov = parseInt(data.settings.fov);
+            camera.updateProjectionMatrix();
+        }
+        if(data.settings.renderDist) {
+            const rDist = parseInt(data.settings.renderDist);
+            settingRender.value = rDist;
+            if (rDist >= 200) {
+                scene.fog = null;
+            } else {
+                if(!scene.fog) scene.fog = new THREE.Fog(0xffffff, 10, rDist);
+                else scene.fog.far = rDist;
+            }
+        }
+        // --- TEXT UPDATE FIX ---
+        const distText = parseInt(settingRender.value) >= 200 ? "Infinite" : settingRender.value;
+        settingsValDisplay.innerText = `FOV: ${settingFov.value}, Dist: ${distText}`;
+    }
+
     nameInput.value = myName;
     accountStatus.innerText = myName + " (" + data.coins + " 💰)";
     modalAccount.style.display = 'none';
@@ -808,28 +925,63 @@ btnHostGame.addEventListener('click', (e) => {
 
 btnStartHost.addEventListener('click', (e) => {
     e.stopPropagation();
-    const maxPlayers = document.getElementById('host-max-players').value;
-    const mapSize = document.getElementById('host-map-size').value;
-    const preRoundTime = document.getElementById('host-pre-time').value;
-    const gameTime = document.getElementById('host-game-time').value;
-    const isPrivate = document.getElementById('host-private').checked;
     
-    const allowedItems = {
-        boot: document.getElementById('item-boot').checked,
-        brick: document.getElementById('item-brick').checked,
-        trap: document.getElementById('item-trap').checked,
-        pepper: document.getElementById('item-pepper').checked,
-        orb: document.getElementById('item-orb').checked,
-        swap: document.getElementById('item-swap').checked,
-        hindered: document.getElementById('item-hindered').checked,
-        scrambler: document.getElementById('item-scrambler').checked,
+    // --- VALIDATION FIX ---
+    const maxP = parseInt(document.getElementById('host-max-players').value);
+    const mSize = parseInt(document.getElementById('host-map-size').value);
+    const pTime = parseInt(document.getElementById('host-pre-time').value);
+    const gTime = parseInt(document.getElementById('host-game-time').value);
+    
+    if(isNaN(maxP) || maxP < 2 || maxP > 20) {
+        alert("Invalid Max Players (Must be 2-20)");
+        return;
+    }
+    if(isNaN(mSize) || mSize < 21 || mSize > 151) {
+        alert("Invalid Map Size (Must be 21-151)");
+        return;
+    }
+    if(isNaN(pTime) || pTime < 0 || pTime > 60) {
+        alert("Invalid Pre-Round Time (0-60)");
+        return;
+    }
+    if(isNaN(gTime) || gTime < 0) {
+        alert("Invalid Game Time");
+        return;
+    }
+
+    // --- ITEM QTY VALIDATION ---
+    const quantities = {
+        boot: parseInt(document.getElementById('qty-boot').value),
+        brick: parseInt(document.getElementById('qty-brick').value),
+        trap: parseInt(document.getElementById('qty-trap').value),
+        pepper: parseInt(document.getElementById('qty-pepper').value),
+        orb: parseInt(document.getElementById('qty-orb').value),
+        swap: parseInt(document.getElementById('qty-swap').value),
+        hindered: parseInt(document.getElementById('qty-hindered').value),
+        scrambler: parseInt(document.getElementById('qty-scrambler').value)
     };
 
+    for(const [key, val] of Object.entries(quantities)) {
+        if(isNaN(val) || val < 0 || val > 20) { // CHANGED MAX TO 20
+            alert(`Invalid quantity for ${key} (Must be 0-20)`);
+            return;
+        }
+    }
+
+    const isPrivate = document.getElementById('host-private').checked;
     const name = nameInput.value.trim();
     if (name) myName = name;
     
     socket.emit('joinGame', myName); 
-    socket.emit('hostGame', { maxPlayers, mapSize, preRoundTime, gameTime, allowedItems, isPrivate });
+    // SEND VALIDATED VALUES (using quantities object for allowedItems)
+    socket.emit('hostGame', { 
+        maxPlayers: maxP, 
+        mapSize: mSize, 
+        preRoundTime: pTime, 
+        gameTime: gTime, 
+        allowedItems: quantities, // Sending numbers now
+        isPrivate 
+    });
     
     modalHost.style.display = 'none';
     mainMenu.style.display = 'none';
@@ -892,19 +1044,44 @@ btnLegend.addEventListener('click', (e) => { e.stopPropagation(); modalLegend.st
 btnSettings.addEventListener('click', (e) => { e.stopPropagation(); modalSettings.style.display = 'flex'; });
 
 // --- SETTINGS LOGIC ---
+// Helper to save settings only when logged in
+function saveSettings() {
+    if(isLoggedIn) {
+        const s = {
+            fov: parseInt(settingFov.value),
+            renderDist: parseInt(settingRender.value)
+        };
+        socket.emit('saveSettings', s);
+    }
+}
+
 settingFov.addEventListener('input', (e) => {
     const val = e.target.value;
     camera.fov = parseInt(val);
     camera.updateProjectionMatrix();
-    settingsValDisplay.innerText = `FOV: ${val}, Dist: ${settingRender.value}`;
+    // --- TEXT UPDATE FIX ---
+    const distText = parseInt(settingRender.value) >= 200 ? "Infinite" : settingRender.value;
+    settingsValDisplay.innerText = `FOV: ${val}, Dist: ${distText}`;
 });
+// Save on change (mouse up)
+settingFov.addEventListener('change', saveSettings);
 
 settingRender.addEventListener('input', (e) => {
-    const val = e.target.value;
-    if(!scene.fog) scene.fog = new THREE.Fog(0xffffff, 10, parseInt(val));
-    else scene.fog.far = parseInt(val);
-    settingsValDisplay.innerText = `FOV: ${settingFov.value}, Dist: ${val}`;
+    const val = parseInt(e.target.value);
+    // --- INFINITE RENDER LOGIC ---
+    if(val >= 200) {
+         scene.fog = null;
+    } else {
+         if(!scene.fog) scene.fog = new THREE.Fog(0xffffff, 10, val);
+         else scene.fog.far = val;
+    }
+    // --- TEXT UPDATE FIX ---
+    const distText = val >= 200 ? "Infinite" : val;
+    settingsValDisplay.innerText = `FOV: ${settingFov.value}, Dist: ${distText}`;
 });
+// Save on change (mouse up)
+settingRender.addEventListener('change', saveSettings);
+
 
 // --- REPORTING LOGIC ---
 window.openBugReport = function() {
@@ -1042,6 +1219,22 @@ function updateTabList() {
         nameSpan.className = "tab-name";
         nameSpan.innerText = pName;
         
+        // KICK BUTTON FOR HOST
+        if (iAmHost) {
+            const kickBtn = document.createElement("span");
+            kickBtn.innerText = " 👢";
+            kickBtn.className = "tab-report"; 
+            kickBtn.title = "Kick Player";
+            kickBtn.style.color = "red";
+            kickBtn.onclick = (e) => {
+                 e.stopPropagation(); 
+                 if(confirm(`Kick ${pName}?`)) {
+                     socket.emit('kickPlayer', id);
+                 }
+            };
+            row.appendChild(kickBtn);
+        }
+
         const reportIcon = document.createElement("span");
         reportIcon.innerText = " 🚩";
         reportIcon.className = "tab-report";
@@ -1063,6 +1256,19 @@ function updateTabList() {
         tabContent.appendChild(waitRow);
     }
 }
+
+// --- NEW: KICK LISTENER ---
+socket.on('kicked', () => {
+    alert("You have been kicked by the host.");
+    location.reload();
+});
+
+// --- NEW: HOST ASSIGNED LISTENER ---
+socket.on('hostAssigned', (newHostId) => {
+    iAmHost = (newHostId === mySocketId);
+    updateHostButtons();
+    if (isTabOpen) updateTabList();
+});
 
 function setupEnterKey(inputId, actionBtnId) {
     const input = document.getElementById(inputId);
@@ -1104,7 +1310,8 @@ const onKeyDown = function (event) {
 
     switch (event.code) {
         case 'Enter':
-            if (isInGame && !gameEnded) {
+            // FIX: Allow chat even if game has ended
+            if (isInGame) {
                 isChatting = true; 
                 controls.unlock();
                 setTimeout(() => chatInput.focus(), 50);
@@ -1441,7 +1648,17 @@ socket.on('initialGameState', (data) => {
     hasBrick = false; hasTrap = false; hasPepper = false;
     brickHud.style.display = 'none'; trapHud.style.display = 'none'; pepperHud.style.display = 'none';
     isChatting = false; chatInput.blur();
-    camera.position.set(4.5, 1.6, 4.5); velocity.set(0, 0, 0);
+    
+    // --- FIX: USE SERVER POSITION INSTEAD OF HARDCODED 4.5 ---
+    if(data.players[mySocketId]) {
+        const p = data.players[mySocketId];
+        camera.position.set(p.x, p.y, p.z);
+    } else {
+        // Fallback if player object missing
+        camera.position.set(4.5, 1.6, 4.5); 
+    }
+    
+    velocity.set(0, 0, 0);
 
     Object.keys(data.players).forEach((id) => {
         if (id !== mySocketId) {
@@ -1517,7 +1734,26 @@ socket.on('newRound', (data) => {
     isChatting = false; chatInput.blur(); minimap.classList.remove('jammed'); scene.background = skyTexture; scene.fog = null; hemiLight.intensity = 0.6; dirLight.intensity = 0.8; flashlight.visible = false;
     map = data.map; exitConfig = data.exit; buildWorld();
     data.items.forEach(item => { createItem(item.id, item.type, item.x, item.z); });
-    camera.position.set(4.5, 1.6, 4.5); velocity.set(0, 0, 0);
+    
+    // --- FIX: CALCULATE CENTER FOR SPAWN ---
+    if (map) {
+        // MAP_SIZE is the grid size (e.g. 61), UNIT_SIZE is 3
+        const center = (map.length * UNIT_SIZE) / 2;
+        camera.position.set(center, 1.6, center);
+    } else {
+        camera.position.set(4.5, 1.6, 4.5);
+    }
+    
+    // --- FIX: RE-APPLY RENDER DISTANCE SETTING ---
+    const rDist = parseInt(settingRender.value);
+    if(rDist >= 200) {
+        scene.fog = null;
+    } else {
+        if(!scene.fog) scene.fog = new THREE.Fog(0xffffff, 10, rDist);
+        else scene.fog.far = rDist;
+    }
+    
+    velocity.set(0, 0, 0);
     if (!controls.isLocked) mainMenu.style.display = 'none';
 });
 
@@ -1548,13 +1784,81 @@ socket.on('radarScrambled', () => { minimap.classList.add('jammed'); scrambleWar
 socket.on('playerTrapped', (id) => { if (otherPlayers[id]) otherPlayers[id].userData.limbs.trapVisual.visible = true; });
 socket.on('playerUntrapped', (id) => { if (otherPlayers[id]) otherPlayers[id].userData.limbs.trapVisual.visible = false; });
 socket.on('playerTeleported', (data) => { if (data.id === mySocketId) { camera.position.set(data.x, data.y, data.z); velocity.set(0, 0, 0); if (data.reason === 'swap') { swapHud.style.display = 'block'; setTimeout(() => { swapHud.style.display = 'none'; }, 2500); } } else if (otherPlayers[data.id]) { const newY = data.y - CAM_HEIGHT; otherPlayers[data.id].position.set(data.x, newY, data.z); otherPlayers[data.id].userData.targetPos.set(data.x, newY, data.z); otherPlayers[data.id].userData.lastPos.copy(otherPlayers[data.id].position); } });
-socket.on('updatePlayerName', (data) => { if (otherPlayers[data.id]) { if(otherPlayers[data.id].userData.label) otherPlayers[data.id].remove(otherPlayers[data.id].userData.label); const label = createNameLabel(data.name); otherPlayers[data.id].add(label); otherPlayers[data.id].userData.label = label; otherPlayers[data.id].userData.nameStr = data.name; } });
-socket.on('newPlayer', (playerInfo) => { const pY = playerInfo.y !== undefined ? playerInfo.y : 1; addPlayer(playerInfo.playerId, playerInfo.x, pY, playerInfo.z, playerInfo.rotation, playerInfo.name, playerInfo.isTrapped, playerInfo.skin); });
-socket.on('playerMoved', (playerInfo) => { if (otherPlayers[playerInfo.playerId]) { const p = otherPlayers[playerInfo.playerId]; if (playerInfo.y !== undefined) p.userData.targetPos.set(playerInfo.x, playerInfo.y - CAM_HEIGHT, playerInfo.z); else p.userData.targetPos.set(playerInfo.x, p.position.y, playerInfo.z); p.userData.targetRot = playerInfo.rotation; } });
-socket.on('playerDisconnected', (id) => { removePlayer(id); });
+socket.on('updatePlayerName', (data) => {
+    // Update name in player list if it exists
+    if (otherPlayers[data.id]) {
+        // Remove old label if any
+        if(otherPlayers[data.id].userData.label) otherPlayers[data.id].remove(otherPlayers[data.id].userData.label);
+        // Add new label
+        const label = createNameLabel(data.name);
+        otherPlayers[data.id].add(label);
+        otherPlayers[data.id].userData.label = label;
+        otherPlayers[data.id].userData.nameStr = data.name;
+    }
+    // NEW: Real-time update for Tab List
+    if (isTabOpen) updateTabList();
+});
+
+socket.on('newPlayer', (playerInfo) => {
+    const pY = playerInfo.y !== undefined ? playerInfo.y : 1;
+    addPlayer(playerInfo.playerId, playerInfo.x, pY, playerInfo.z, playerInfo.rotation, playerInfo.name, playerInfo.isTrapped, playerInfo.skin);
+    
+    // NEW: Real-time update for Tab List
+    if (isTabOpen) updateTabList();
+});
+
+socket.on('playerMoved', (playerInfo) => { if (otherPlayers[playerInfo.playerId]) { const p = otherPlayers[playerInfo.playerId]; if (playerInfo.y !== undefined) p.userData.targetPos.set(playerInfo.x, playerInfo.y - CAM_HEIGHT, playerInfo.z); else p.userData.targetPos.set(playerInfo.x, p.position.y, playerInfo.z); let rotDiff = playerInfo.rotation - p.rotation.y; while (rotDiff > Math.PI) rotDiff -= Math.PI * 2; while (rotDiff < -Math.PI) rotDiff += Math.PI * 2; p.userData.targetRot = p.rotation.y + rotDiff; } });
+
+socket.on('playerDisconnected', (id) => {
+    removePlayer(id);
+    // NEW: Real-time update for Tab List
+    if (isTabOpen) updateTabList();
+});
+
 socket.on('darknessTriggered', () => { blindedWarning.style.display = 'block'; let timeLeft = 15; blindVicTimer.innerText = timeLeft; if (blindnessInterval) clearInterval(blindnessInterval); blindnessInterval = setInterval(() => { timeLeft--; blindVicTimer.innerText = timeLeft; if (timeLeft <= 0) clearInterval(blindnessInterval); }, 1000); flashlight.visible = true; scene.background = new THREE.Color(0x000000); scene.fog = new THREE.Fog(0x000000, 0, 15); hemiLight.intensity = 0.05; dirLight.intensity = 0.05; if (blindnessTimeout) clearTimeout(blindnessTimeout); blindnessTimeout = setTimeout(() => { blindedWarning.style.display = 'none'; flashlight.visible = false; scene.background = skyTexture; scene.fog = null; hemiLight.intensity = 0.6; dirLight.intensity = 0.8; }, 15000); });
 
-function checkCollision(x, z) { if (!map) return false; if (isGhost) { const gridX = Math.floor(x / UNIT_SIZE); const gridZ = Math.floor(z / UNIT_SIZE); if (gridX < 0 || gridZ < 0 || gridZ >= MAP_SIZE || gridX >= MAP_SIZE) return true; return false; } const points = [ { x: x + PLAYER_RADIUS, z: z + PLAYER_RADIUS }, { x: x - PLAYER_RADIUS, z: z + PLAYER_RADIUS }, { x: x + PLAYER_RADIUS, z: z - PLAYER_RADIUS }, { x: x - PLAYER_RADIUS, z: z - PLAYER_RADIUS } ]; for (const p of points) { const gridX = Math.floor(p.x / UNIT_SIZE); const gridZ = Math.floor(p.z / UNIT_SIZE); if (exitConfig) { if (exitConfig.side === 'east' && gridX >= MAP_SIZE - 1 && gridZ === exitConfig.z) continue; if (exitConfig.side === 'south' && gridZ >= MAP_SIZE - 1 && gridX === exitConfig.x) continue; } if (gridX < 0 || gridZ < 0 || gridX >= MAP_SIZE || gridZ >= MAP_SIZE) return true; if (gridX < MAP_SIZE && map[gridZ] && map[gridZ][gridX] === 1) return true; } return false; }
+function checkCollision(x, z) {
+    if (!map) return false;
+    
+    if (isGhost) {
+        // If ghost mode, check generic map boundaries
+        const gridX = Math.floor(x / UNIT_SIZE);
+        const gridZ = Math.floor(z / UNIT_SIZE);
+        if (gridX < 0 || gridZ < 0 || gridZ >= MAP_SIZE || gridX >= MAP_SIZE) return true;
+        return false;
+    }
+
+    const points = [
+        { x: x + PLAYER_RADIUS, z: z + PLAYER_RADIUS },
+        { x: x - PLAYER_RADIUS, z: z + PLAYER_RADIUS },
+        { x: x + PLAYER_RADIUS, z: z - PLAYER_RADIUS },
+        { x: x - PLAYER_RADIUS, z: z - PLAYER_RADIUS }
+    ];
+
+    for (const p of points) {
+        const gridX = Math.floor(p.x / UNIT_SIZE);
+        const gridZ = Math.floor(p.z / UNIT_SIZE);
+        
+        // --- FIX: ALLOW EXIT COLLISIONS FOR NORTH/WEST ---
+        if (exitConfig) {
+            // NORTH EXIT: Allow if z is negative but x aligns with exit
+            if (exitConfig.side === 'north' && gridZ < 0 && gridX === exitConfig.x) continue;
+            // WEST EXIT: Allow if x is negative but z aligns with exit
+            if (exitConfig.side === 'west' && gridX < 0 && gridZ === exitConfig.z) continue;
+            // EAST EXIT: Allow if x >= MAP_SIZE
+            if (exitConfig.side === 'east' && gridX >= MAP_SIZE - 1 && gridZ === exitConfig.z) continue;
+            // SOUTH EXIT: Allow if z >= MAP_SIZE
+            if (exitConfig.side === 'south' && gridZ >= MAP_SIZE - 1 && gridX === exitConfig.x) continue;
+        }
+
+        // Standard Bounds Check
+        if (gridX < 0 || gridZ < 0 || gridX >= MAP_SIZE || gridZ >= MAP_SIZE) return true;
+        
+        // Wall Check
+        if (gridX < MAP_SIZE && map[gridZ] && map[gridZ][gridX] === 1) return true;
+    }
+    return false;
+}
 function activateSuperJump() { currentJumpForce = JUMP_SUPER; powerupHud.style.display = 'block'; let secondsLeft = 15; timerVal.innerText = secondsLeft; if (powerupTimerInterval) clearInterval(powerupTimerInterval); powerupTimerInterval = setInterval(() => { secondsLeft--; timerVal.innerText = secondsLeft; if (secondsLeft <= 0) { clearInterval(powerupTimerInterval); currentJumpForce = JUMP_NORMAL; powerupHud.style.display = 'none'; } }, 1000); }
 function activateGhostMode() { isGhost = true; socket.emit('toggleGhost', true); ghostHud.style.display = 'block'; let secondsLeft = 3; ghostTimer.innerText = secondsLeft; if (ghostInterval) clearInterval(ghostInterval); ghostInterval = setInterval(() => { secondsLeft--; ghostTimer.innerText = secondsLeft; if (secondsLeft <= 0) { clearInterval(ghostInterval); isGhost = false; socket.emit('toggleGhost', false); ghostHud.style.display = 'none'; const gridX = Math.floor(camera.position.x / UNIT_SIZE); const gridZ = Math.floor(camera.position.z / UNIT_SIZE); if (map[gridZ][gridX] === 1) { const dirs = [[0,1], [0,-1], [1,0], [-1,0]]; for(let d of dirs) { const nx = gridX + d[0]; const nz = gridZ + d[1]; if (nx > 0 && nx < MAP_SIZE && nz > 0 && nz < MAP_SIZE) { if (map[nz][nx] === 0) { camera.position.x = (nx * UNIT_SIZE) + (UNIT_SIZE/2); camera.position.z = (nz * UNIT_SIZE) + (UNIT_SIZE/2); velocity.set(0,0,0); return; } } } } } }, 1000); }
 function triggerTrap(trapId) { isTrapped = true; vineCage.visible = true; trappedWarning.style.display = 'block'; socket.emit('trapTriggered', trapId); let timeLeft = 10; trapTimer.innerText = timeLeft; if (trapInterval) clearInterval(trapInterval); trapInterval = setInterval(() => { timeLeft--; trapTimer.innerText = timeLeft; if (timeLeft <= 0) { clearInterval(trapInterval); isTrapped = false; vineCage.visible = false; trappedWarning.style.display = 'none'; } }, 1000); }
@@ -1574,11 +1878,33 @@ function animate() {
         if (isInverted) { if (moveForward) inputVelocity.sub(forwardVector); if (moveBackward) inputVelocity.add(forwardVector); if (moveRight) inputVelocity.sub(rightVector); if (moveLeft) inputVelocity.add(rightVector); } 
         else { if (moveForward) inputVelocity.add(forwardVector); if (moveBackward) inputVelocity.sub(forwardVector); if (moveRight) inputVelocity.add(rightVector); if (moveLeft) inputVelocity.sub(rightVector); }
         inputVelocity.normalize();
-        if (exitConfig) { const gx = Math.floor(camera.position.x / UNIT_SIZE); const gz = Math.floor(camera.position.z / UNIT_SIZE); if (exitConfig.side === 'east') { if(gx >= MAP_SIZE) socket.emit('playerWon'); } else { if(gz >= MAP_SIZE) socket.emit('playerWon'); } } else if (camera.position.x > WORLD_SIZE) socket.emit('playerWon'); 
+        if (exitConfig) { 
+            const gx = Math.floor(camera.position.x / UNIT_SIZE); 
+            const gz = Math.floor(camera.position.z / UNIT_SIZE); 
+            
+            // --- FIX: USE RAW WORLD COORDINATES FOR WIN DETECTION ---
+            if (exitConfig.side === 'east' && gx >= MAP_SIZE) socket.emit('playerWon');
+            else if (exitConfig.side === 'south' && gz >= MAP_SIZE) socket.emit('playerWon');
+            else if (exitConfig.side === 'north' && camera.position.z < 0) socket.emit('playerWon'); // Raw Z check
+            else if (exitConfig.side === 'west' && camera.position.x < 0) socket.emit('playerWon');  // Raw X check
+        } else if (camera.position.x > WORLD_SIZE) socket.emit('playerWon'); 
     }
     const currentSpeed = isFlying ? FLY_MOVE_SPEED : WALK_SPEED;
     if (inputVelocity.length() > 0) { velocity.x -= velocity.x * 10.0 * delta; velocity.z -= velocity.z * 10.0 * delta; velocity.x += inputVelocity.x * currentSpeed * delta; velocity.z += inputVelocity.z * currentSpeed * delta; } else { velocity.x -= velocity.x * 10.0 * delta; velocity.z -= velocity.z * 10.0 * delta; }
-    if (isFlying) { velocity.y = 0; if (flyUp) velocity.y = FLY_VERTICAL_SPEED; if (flyDown) velocity.y = -FLY_VERTICAL_SPEED; camera.position.x += velocity.x * delta; camera.position.z += velocity.z * delta; camera.position.y += velocity.y * delta; } else { velocity.y -= GRAVITY * delta; const steps = 10; const subDelta = delta / steps; for (let i = 0; i < steps; i++) { const originalX = camera.position.x; camera.position.x += velocity.x * subDelta; if (checkCollision(camera.position.x, camera.position.z)) { camera.position.x = originalX; velocity.x = 0; } const originalZ = camera.position.z; camera.position.z += velocity.z * subDelta; if (checkCollision(camera.position.x, camera.position.z)) { camera.position.z = originalZ; velocity.z = 0; } } camera.position.y += velocity.y * delta; if (camera.position.y < -10) { camera.position.set(4.5, CAM_HEIGHT, 4.5); velocity.set(0,0,0); } if (camera.position.y < CAM_HEIGHT) { velocity.y = 0; camera.position.y = CAM_HEIGHT; canJump = true; } }
+    if (isFlying) { velocity.y = 0; if (flyUp) velocity.y = FLY_VERTICAL_SPEED; if (flyDown) velocity.y = -FLY_VERTICAL_SPEED; camera.position.x += velocity.x * delta; camera.position.z += velocity.z * delta; camera.position.y += velocity.y * delta; } else { velocity.y -= GRAVITY * delta; const steps = 10; const subDelta = delta / steps; for (let i = 0; i < steps; i++) { const originalX = camera.position.x; camera.position.x += velocity.x * subDelta; if (checkCollision(camera.position.x, camera.position.z)) { camera.position.x = originalX; velocity.x = 0; } const originalZ = camera.position.z; camera.position.z += velocity.z * subDelta; if (checkCollision(camera.position.x, camera.position.z)) { camera.position.z = originalZ; velocity.z = 0; } } camera.position.y += velocity.y * delta; 
+    
+    // --- FIX: VOID OUT RESET TO CENTER ---
+    if (camera.position.y < -10) { 
+        if(map) {
+             const center = (map.length * UNIT_SIZE) / 2;
+             camera.position.set(center, 1.6, center);
+        } else {
+             camera.position.set(4.5, 1.6, 4.5); 
+        }
+        velocity.set(0,0,0); 
+    }
+    
+    if (camera.position.y < CAM_HEIGHT) { velocity.y = 0; camera.position.y = CAM_HEIGHT; canJump = true; } }
     const lookDir = new THREE.Vector3(); camera.getWorldDirection(lookDir); const myRotation = Math.atan2(lookDir.x, lookDir.z) + Math.PI;
     socket.emit('playerMovement', { x: camera.position.x, y: camera.position.y, z: camera.position.z, rotation: myRotation });
     if (minimapPlayer) { const pctX = camera.position.x / WORLD_SIZE; const pctZ = camera.position.z / WORLD_SIZE; minimapPlayer.style.left = (pctX * 100) + '%'; minimapPlayer.style.top = (pctZ * 100) + '%'; }

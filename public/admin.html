@@ -9,37 +9,24 @@
     <style>
         body { background: #111; color: #ddd; font-family: 'Segoe UI', sans-serif; padding: 20px; }
         h1 { color: gold; text-align: center; text-transform: uppercase; letter-spacing: 2px; }
-        
         .container { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-        
         .card { background: #222; border: 1px solid #444; border-radius: 10px; padding: 20px; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
         .full-width { grid-column: span 2; }
-        
         h2 { border-bottom: 1px solid #555; padding-bottom: 10px; margin-top: 0; color: #00ccff; }
-        
-        /* Stats */
         .stat-box { display: flex; justify-content: space-around; text-align: center; }
         .stat-num { font-size: 32px; font-weight: bold; color: white; display: block; }
         .stat-label { color: #888; font-size: 12px; text-transform: uppercase; }
-
-        /* Tables */
         table { width: 100%; border-collapse: collapse; font-size: 14px; }
         th { text-align: left; color: #aaa; padding: 5px; border-bottom: 1px solid #555; }
         td { padding: 8px 5px; border-bottom: 1px solid #333; }
         tr:hover { background: #2a2a2a; }
-        
         .btn-ban { background: #8b0000; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; }
         .btn-del { background: #444; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; }
         .btn-chat { background: #007bff; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; margin-right: 5px; }
-        .btn-ban:hover { background: red; }
-        .btn-chat:hover { background: #0056b3; }
-        
+        .btn-select { background: #28a745; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; }
         .btn-refresh { display: block; margin: 20px auto; padding: 10px 30px; background: green; color: white; border: none; font-size: 18px; cursor: pointer; border-radius: 5px;}
-
         #error-msg { color: red; text-align: center; font-size: 20px; display: none; margin-top: 50px; }
         #dashboard { display: none; }
-
-        /* Chat Log Modal */
         #log-modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); justify-content: center; align-items: center; z-index: 999; }
         .modal-content { background: #222; padding: 20px; border: 1px solid #555; width: 500px; max-height: 80%; overflow-y: auto; color: white; border-radius: 10px; }
         .log-line { border-bottom: 1px solid #333; padding: 2px 0; font-size: 12px; font-family: monospace; }
@@ -63,6 +50,25 @@
                     <div><span class="stat-num" id="stat-games">0</span><span class="stat-label">Games Played</span></div>
                     <div><span class="stat-num" id="stat-pub-lob">0</span><span class="stat-label">Public Lobbies</span></div>
                     <div><span class="stat-num" id="stat-priv-lob">0</span><span class="stat-label">Private Lobbies</span></div>
+                </div>
+            </div>
+            
+            <div class="card full-width">
+                <h2>Active Lobbies</h2>
+                <div style="display: flex; gap: 20px;">
+                    <div style="flex: 1; max-height: 300px; overflow-y: auto;">
+                        <table id="lobby-table">
+                            <thead><tr><th>ID</th><th>Type</th><th>Players</th><th>Action</th></tr></thead>
+                            <tbody id="list-lobbies"></tbody>
+                        </table>
+                    </div>
+                    <div style="flex: 1; border-left: 1px solid #444; padding-left: 20px;">
+                        <h3 id="selected-lobby-id" style="color: gold; margin-top: 0;">Select a Lobby</h3>
+                        <table id="player-table" style="display:none;">
+                            <thead><tr><th>Name</th><th>Type</th><th>ID</th></tr></thead>
+                            <tbody id="list-lobby-players"></tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
 
@@ -98,9 +104,9 @@
         const errorMsg = document.getElementById('error-msg');
         const dash = document.getElementById('dashboard');
         
-        let currentReports = []; // Store report data to access chat logs
+        let currentReports = []; 
+        let activeLobbies = [];
 
-        // 1. Auto-Login using existing token
         const token = localStorage.getItem('gm_session');
         if(!token) {
             errorMsg.style.display = 'block';
@@ -109,7 +115,6 @@
             socket.emit('verifySession', token);
         }
 
-        // 2. Handle Auth Response
         socket.on('authSuccess', (data) => {
             if(data.username === '11CHASE11') {
                 errorMsg.style.display = 'none';
@@ -126,96 +131,84 @@
             errorMsg.innerText = "ACCESS DENIED: Invalid Session.";
         });
 
-        // 3. Data Handling
         function refreshData() {
             socket.emit('reqAdminData');
         }
 
         socket.on('resAdminData', (data) => {
-            // Stats
             document.getElementById('stat-users').innerText = data.stats.users;
             document.getElementById('stat-traffic').innerText = data.stats.connections;
             document.getElementById('stat-games').innerText = data.stats.games;
             document.getElementById('stat-pub-lob').innerText = data.stats.lobbies.public;
             document.getElementById('stat-priv-lob').innerText = data.stats.lobbies.private;
 
-            // Reports
-            currentReports = data.reports; // Save for Chat Logs
+            currentReports = data.reports;
             const repList = document.getElementById('list-reports');
             repList.innerHTML = '';
             data.reports.forEach((r, index) => {
                 const tr = document.createElement('tr');
-                tr.innerHTML = `
-                    <td>${r.reporter}</td>
-                    <td><strong>${r.reported}</strong></td>
-                    <td>
-                        ${r.category}<br>
-                        <small style="color:#aaa">${r.details}</small>
-                    </td>
-                    <td>
-                        <button class="btn-chat" onclick="viewLogs(${index})">View Chat</button>
-                        <button class="btn-ban" onclick="banUser('${r.reported}', '${r._id}')">BAN</button>
-                        <button class="btn-del" onclick="delReport('${r._id}')">X</button>
-                    </td>
-                `;
+                tr.innerHTML = `<td>${r.reporter}</td><td><strong>${r.reported}</strong></td><td>${r.category}<br><small style="color:#aaa">${r.details}</small></td><td><button class="btn-chat" onclick="viewLogs(${index})">Logs</button><button class="btn-ban" onclick="banUser('${r.reported}', '${r._id}')">BAN</button><button class="btn-del" onclick="delReport('${r._id}')">X</button></td>`;
                 repList.appendChild(tr);
             });
 
-            // Bugs
             const bugList = document.getElementById('list-bugs');
             bugList.innerHTML = '';
             data.bugs.forEach(b => {
                 const tr = document.createElement('tr');
-                tr.innerHTML = `
-                    <td>${b.reporter}</td>
-                    <td>${b.details}</td>
-                    <td><button class="btn-del" onclick="delReport('${b._id}')">Done</button></td>
-                `;
+                tr.innerHTML = `<td>${b.reporter}</td><td>${b.details}</td><td><button class="btn-del" onclick="delReport('${b._id}')">Done</button></td>`;
                 bugList.appendChild(tr);
             });
+            
+            // --- LOBBY LIST ---
+            activeLobbies = data.lobbies;
+            const lobbyList = document.getElementById('list-lobbies');
+            lobbyList.innerHTML = '';
+            if(data.lobbies.length === 0) {
+                lobbyList.innerHTML = '<tr><td colspan="4" style="text-align:center;">No Active Lobbies</td></tr>';
+            } else {
+                data.lobbies.forEach((l, idx) => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td>${l.id}</td>
+                        <td>${l.private ? '<span style="color:red">Private</span>' : '<span style="color:lime">Public</span>'}</td>
+                        <td>${l.count}/${l.max}</td>
+                        <td><button class="btn-select" onclick="inspectLobby(${idx})">View</button></td>
+                    `;
+                    lobbyList.appendChild(tr);
+                });
+            }
         });
 
-        socket.on('adminActionSuccess', (msg) => {
-            alert(msg);
-            refreshData();
-        });
+        window.inspectLobby = function(index) {
+            const lobby = activeLobbies[index];
+            document.getElementById('selected-lobby-id').innerText = `Lobby: ${lobby.id}`;
+            document.getElementById('player-table').style.display = 'table';
+            const tbody = document.getElementById('list-lobby-players');
+            tbody.innerHTML = '';
+            
+            lobby.players.forEach(p => {
+                const tr = document.createElement('tr');
+                const typeIcon = p.isBot ? '<i class="fas fa-robot" style="color:cyan"></i> Bot' : '<i class="fas fa-user" style="color:lime"></i> Human';
+                tr.innerHTML = `<td>${p.name}</td><td>${typeIcon}</td><td style="font-family:monospace; font-size:10px; color:#888;">${p.id}</td>`;
+                tbody.appendChild(tr);
+            });
+        };
 
-        socket.on('adminError', (msg) => {
-            alert("Error: " + msg);
-        });
+        socket.on('adminActionSuccess', (msg) => { alert(msg); refreshData(); });
+        socket.on('adminError', (msg) => { alert("Error: " + msg); });
 
-        // Actions
         window.viewLogs = function(index) {
             const report = currentReports[index];
             const container = document.getElementById('log-container');
             container.innerHTML = '';
-            
             if(report.chatLogs && report.chatLogs.length > 0) {
-                report.chatLogs.forEach(log => {
-                    const div = document.createElement('div');
-                    div.className = 'log-line';
-                    div.innerText = log;
-                    container.appendChild(div);
-                });
-            } else {
-                container.innerHTML = '<p style="color:#777;">No logs recorded for this report.</p>';
-            }
-            
+                report.chatLogs.forEach(log => { const div = document.createElement('div'); div.className = 'log-line'; div.innerText = log; container.appendChild(div); });
+            } else { container.innerHTML = '<p style="color:#777;">No logs recorded for this report.</p>'; }
             document.getElementById('log-modal').style.display = 'flex';
         };
 
-        window.banUser = function(name, reportId) {
-            if(confirm(`Are you sure you want to BAN ${name}?`)) {
-                socket.emit('adminBanUser', name);
-                // Optional: also delete the report
-                socket.emit('adminDeleteReport', reportId);
-            }
-        };
-
-        window.delReport = function(id) {
-            socket.emit('adminDeleteReport', id);
-        };
-
+        window.banUser = function(name, reportId) { if(confirm(`Are you sure you want to BAN ${name}?`)) { socket.emit('adminBanUser', name); socket.emit('adminDeleteReport', reportId); } };
+        window.delReport = function(id) { socket.emit('adminDeleteReport', id); };
     </script>
 </body>
 </html>
